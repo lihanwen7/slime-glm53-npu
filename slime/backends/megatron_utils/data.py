@@ -9,7 +9,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from slime.utils import accelerator
 from slime.utils.types import RolloutBatch
 
-from .cp_utils import slice_with_cp
+from .cp_utils import get_thd_partitioned_indices, pad_thd_sequences_for_cp, slice_with_cp
 
 
 @dataclass
@@ -65,6 +65,8 @@ def get_batch(
 
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    partition_indices = None
 
     if allgather_cp:
         # DSA mode: concatenate all sequences first, then slice once with CP.
@@ -84,6 +86,12 @@ def get_batch(
             cu_seqlens_list.append(cu_seqlens_list[-1] + pad)
 
         tokens = tokens.chunk(cp_size, dim=0)[cp_rank]
+    elif cp_size > 1:
+        global_tokens, _, cu_seqlens_padded = pad_thd_sequences_for_cp(tokens, pad_token_id, cp_size, tp_size)
+        partition_indices = get_thd_partitioned_indices(cu_seqlens_padded, global_tokens.size(0), cp_size, cp_rank)
+        tokens = global_tokens.index_select(0, partition_indices)
+        cu_seqlens_list = cu_seqlens_padded.tolist()
+        pad = 0
     else:
         tokens = [slice_with_cp(t, pad_token_id) for t in tokens]
 
@@ -107,6 +115,8 @@ def get_batch(
     packed_seq_params = PackedSeqParamsWithCPUOffsets(
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_q_padded=cu_seqlens,
+        cu_seqlens_kv_padded=cu_seqlens,
         cu_seqlens_q_cpu=tuple(cu_seqlens_list),
         max_seqlen_q=max_seqlen,
         max_seqlen_kv=max_seqlen,
@@ -129,7 +139,7 @@ def get_batch(
         prompt_length = total_length - response_length
         # Align mask to token stream positions (prompt_length-1 left pad, 1 right pad)
         loss_mask = F.pad(loss_mask, (prompt_length - 1, 1), value=0)
-        if allgather_cp:
+        if allgather_cp or cp_size > 1:
             loss_masks.append(loss_mask)
             continue
         loss_mask = slice_with_cp(loss_mask, 0)
@@ -141,6 +151,10 @@ def get_batch(
         if pad != 0:
             loss_masks = F.pad(loss_masks, (0, pad), value=0)
         loss_masks = loss_masks.chunk(cp_size, dim=0)[cp_rank].unsqueeze(0)
+    elif cp_size > 1:
+        global_loss_masks, _, mask_offsets = pad_thd_sequences_for_cp(loss_masks, 0, cp_size, tp_size)
+        assert torch.equal(mask_offsets, cu_seqlens_padded), "Loss-mask/token THD CP offsets differ"
+        loss_masks = global_loss_masks.index_select(0, partition_indices).unsqueeze(0)
     else:
         loss_masks = torch.cat(loss_masks)
         loss_masks = F.pad(loss_masks, (0, pad), value=0).unsqueeze(0)
