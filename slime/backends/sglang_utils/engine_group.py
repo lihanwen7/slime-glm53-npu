@@ -11,6 +11,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from slime.backends.sglang_utils.server_control import unregister_worker
 from slime.backends.sglang_utils.sglang_config import ServerGroupConfig
 from slime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
+from slime.utils import accelerator
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +208,7 @@ class ServerGroup:
             }
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
-                num_gpus=num_gpus,
+                **accelerator.ray_remote_options(num_gpus),
                 scheduling_strategy=scheduling_strategy,
                 runtime_env={
                     "env_vars": add_default_ray_env_vars(env_vars),

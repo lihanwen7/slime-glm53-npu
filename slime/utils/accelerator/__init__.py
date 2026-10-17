@@ -525,5 +525,17 @@ def visible_devices_env_key() -> str:
     return _backend().visible_devices_env
 
 
+def ray_resource_name() -> str:
+    return _backend().ray_resource_name
+
+
+def ray_remote_options(amount: float) -> dict[str, Any]:
+    """Return Ray actor options for the selected accelerator resource."""
+    resource_name = ray_resource_name()
+    if resource_name == "GPU":
+        return {"num_gpus": amount}
+    return {"resources": {resource_name: amount}}
+
+
 def resolve_visible_device_id(physical_device_id: int | float | str) -> int:
     return _backend().resolve_visible_device_id(physical_device_id)
