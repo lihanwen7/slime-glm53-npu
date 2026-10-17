@@ -37,6 +37,16 @@ def convert_qwen3_5_to_hf(args, name, param):
     Qwen3.5 uses model.language_model.layers prefix and has separate
     in_proj_qkv, in_proj_z, in_proj_b, in_proj_a for linear attention.
     """
+    # Legacy Ascend and native GDN use incompatible tensor layouts.
+    import os
+
+    if os.environ.get("SLIME_QWEN35_LEGACY_ASCEND_LAYOUT", "0") == "1":
+        if getattr(args, "qwen_gdn_implementation", None) == "megatron":
+            raise ValueError("Legacy Ascend layout cannot be used with native Megatron GDN")
+        from .qwen3_5_legacy_ascend import convert_qwen3_5_to_hf as legacy_convert
+
+        return legacy_convert(args, name, param)
+
     if name.startswith("module.module.language_model."):
         name = "module.module." + name.removeprefix("module.module.language_model.")
 
