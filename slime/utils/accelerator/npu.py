@@ -6,6 +6,8 @@ Importing this module never imports ``torch_npu``. The runtime bootstrap in
 
 from __future__ import annotations
 
+import importlib
+
 from typing import Any
 
 import torch
@@ -27,6 +29,7 @@ class NPUAccelerator(TorchAccelerator):
     name = "npu"
     device_type = "npu"
     communication_backend_name = "hccl"
+    ray_resource_name = "NPU"
 
     @property
     def visible_devices_env(self) -> str:
@@ -40,6 +43,14 @@ class NPUAccelerator(TorchAccelerator):
 
     def is_available(self) -> bool:
         return is_npu_available()
+
+    def post_import_torch(self) -> None:
+        """Load the optional Ascend Megatron adapter after torch_npu bootstrap."""
+        try:
+            importlib.import_module("megatron_adaptor")
+        except ModuleNotFoundError as exc:
+            if exc.name != "megatron_adaptor":
+                raise
 
     def weight_update_backend(self, default: str = "nccl") -> str:
         return "cpu:gloo,npu:hccl" if default == "nccl" else default
