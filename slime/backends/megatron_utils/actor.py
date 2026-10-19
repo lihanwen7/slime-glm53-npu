@@ -673,10 +673,14 @@ class MegatronTrainRayActor(TrainRayActor):
                 # Clear connection markers only after every rank is connected.
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
-            print_memory("before update_weights")
-            self.weight_updater.update_weights()
-            print_memory("after update_weights")
+        # NPU empty_cache cannot run inside TMS's private allocation pool.
+        # Exit the pool before flushing deferred cache releases.
+        defer_cache = self.args.offload_train and accelerator.device_type() == "npu"
+        with accelerator.defer_empty_cache() if defer_cache else nullcontext():
+            with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+                print_memory("before update_weights")
+                self.weight_updater.update_weights()
+                print_memory("after update_weights")
 
         if reconnect_rollout_engines:
             self.sleep()

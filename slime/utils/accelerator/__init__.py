@@ -432,7 +432,28 @@ def new_event(*args, **kwargs) -> Any:
     return event_type(*args, **kwargs)
 
 
+# Scoped deferral is needed while an NPU private allocation pool is active.
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_cache_deferral_depth = ContextVar("slime_cache_deferral_depth", default=0)
+
+
+@contextmanager
+def defer_empty_cache():
+    depth = _cache_deferral_depth.get()
+    token = _cache_deferral_depth.set(depth + 1)
+    try:
+        yield
+    finally:
+        _cache_deferral_depth.reset(token)
+        if depth == 0:
+            empty_cache()
+
+
 def empty_cache() -> None:
+    if _cache_deferral_depth.get():
+        return
     return _backend().empty_cache()
 
 

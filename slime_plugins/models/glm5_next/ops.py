@@ -9,8 +9,16 @@ class ClampedSwiGLU(torch.nn.Module):
         super().__init__()
         self.limit = config.activation_func_clamp_value
 
-    @torch.compile(dynamic=True)
     def forward(self, x):
+        if x.device.type == "npu":
+            return self._forward(x)
+        return self._compiled_forward(x)
+
+    @torch.compile(dynamic=True)
+    def _compiled_forward(self, x):
+        return self._forward(x)
+
+    def _forward(self, x):
         gate, up = x.float().chunk(2, dim=-1)
         return (F.silu(gate.clamp(max=self.limit)) * up.clamp(-self.limit, self.limit)).to(x.dtype)
 

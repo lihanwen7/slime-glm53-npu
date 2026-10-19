@@ -179,7 +179,6 @@ class RolloutManager:
 
     def attach_training(self, args, deployment):
         """Bind a driver to the same serving owner, including after manager death."""
-        from slime.data.queue_data_source import QueueDataSource
         from slime.ray.training_recovery import TrainingResume
 
         was_paused = self.pause_rollout_admission()
@@ -191,11 +190,13 @@ class RolloutManager:
         self.servers = deployment.servers
         if self.recovery is not None:
             self.recovery.reconcile_checkpoint()
-            if isinstance(self.data_source, QueueDataSource):
-                # A queue commit can succeed while its RPC fails. Reconcile on
-                # live-manager retries too, before training can consume and GC
-                # a conversion missing from the checkpoint replay window.
-                self.recovery.reconcile_collection(self.controller, self.data_source.branch_id)
+            if self.args.rollout_data_transport == "straw":
+                from slime.data.queue_data_source import QueueDataSource
+                if isinstance(self.data_source, QueueDataSource):
+                    # A queue commit can succeed while its RPC fails. Reconcile on
+                    # live-manager retries too, before training can consume and GC
+                    # a conversion missing from the checkpoint replay window.
+                    self.recovery.reconcile_collection(self.controller, self.data_source.branch_id)
         # The saved load boundary wins over new CLI settings, while trainer
         # parallelism and memory limits still come from the new attempt.
         weight_version = getattr(args, "update_weight_start_version", 0)
@@ -243,10 +244,11 @@ class RolloutManager:
 
     def _source_state(self):
         """Snapshot the cursor, leaving live queue tasks with their controller."""
-        from slime.data.queue_data_source import QueueDataSource
+        if self.args.rollout_data_transport == "straw":
+            from slime.data.queue_data_source import QueueDataSource
 
-        if isinstance(self.data_source, QueueDataSource):
-            return self.data_source.manager_state()
+            if isinstance(self.data_source, QueueDataSource):
+                return self.data_source.manager_state()
         if state_dict := getattr(self.data_source, "state_dict", None):
             return state_dict()
         return None

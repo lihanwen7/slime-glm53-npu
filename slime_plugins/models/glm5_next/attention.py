@@ -3,13 +3,26 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.modules.conv import causal_conv1d
-from fla.ops.cp import build_cp_context
-from fla.ops.kda import chunk_kda
+import os
+
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 
-from slime_plugins.models.glm5.ops.sparse_mla import SparseMLA
+if os.environ.get("SLIME_ACCELERATOR", "").lower() == "npu":
+    from .npu_backend import (
+        FusedRMSNormGated,
+        ShortConvolution,
+        SparseMLA,
+        build_cp_context,
+        causal_conv1d,
+        chunk_kda,
+    )
+else:
+    from fla.modules import FusedRMSNormGated, ShortConvolution
+    from fla.modules.conv import causal_conv1d
+    from fla.ops.cp import build_cp_context
+    from fla.ops.kda import chunk_kda
+
+    from slime_plugins.models.glm5.ops.sparse_mla import SparseMLA
 
 from .ops import pooled_indexer_topk
 
