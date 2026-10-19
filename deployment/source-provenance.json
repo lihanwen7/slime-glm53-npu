@@ -1,0 +1,19 @@
+{
+  "snapshot_time": "2026-10-19T11:41:16.340511+08:00",
+  "source_root": "/mnt/share/l00804615_glm53_cann930_new",
+  "included_untracked_source": [
+    "slime_plugins/models/glm5_next/ascendc_fla_utils.py",
+    "slime_plugins/models/glm5_next/ascendc_kda.py",
+    "slime_plugins/models/glm5_next/ascendc_l2norm.py",
+    "slime_plugins/models/glm5_next/npu_backend.py",
+    "slime_plugins/models/glm5_next/validation.py"
+  ],
+  "excluded_untracked_paths": [
+    "tensorboard_log"
+  ],
+  "copyright_note": "Copied AscendC/FLA helpers retain their original license headers; these are not new kernel implementations.",
+  "optional_diagnostics": [
+    "SGLANG_NPU_GRAPH_CPU_BACKUP",
+    "SGLANG_NPU_PRE_OFFLOAD_FENCE"
+  ]
+}

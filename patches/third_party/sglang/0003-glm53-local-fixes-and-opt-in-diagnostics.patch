@@ -1,0 +1,102 @@
+diff --git a/python/sglang/kernels/ops/layernorm/mhc.py b/python/sglang/kernels/ops/layernorm/mhc.py
+index 0c964af1ea..18539cc4e9 100644
+--- a/python/sglang/kernels/ops/layernorm/mhc.py
++++ b/python/sglang/kernels/ops/layernorm/mhc.py
+@@ -2,6 +2,7 @@ import functools
+ import importlib
+ import logging
+ import math
++import os
+ import threading
+ from typing import Tuple
+ 
+@@ -1883,6 +1884,23 @@ def _mhc_post_dispatch(
+     return mhc_post(x, residual, post_layer_mix, comb_res_mix)
+ 
+ 
++def _npu_hc_pre_with_tail_guard(x, hc_fn, hc_scale, hc_base, **kwargs):
++    # The deployed A5 HcPreSinkhorn copies rowFactor rows even in a tail
++    # iteration whose curRowFactor is smaller. Keep the logical shape unchanged
++    # while backing the final input tile with storage. Opt in only for the
++    # validated GLM5 shape; no custom operator or numerical formula changes.
++    if os.getenv("SGLANG_NPU_HC_PRE_TAIL_GUARD", "0") == "1":
++        if x.dtype != torch.bfloat16 or tuple(x.shape[1:]) != (4, 4096):
++            raise ValueError("NPU hc_pre tail guard is validated for BF16 [tokens,4,4096]")
++        # 1 MiB = 32 complete rows, larger than the deployed kernel's
++        # double-buffered UB input tile. The original shape/strides are retained.
++        storage = torch.zeros(x.numel() + 524288, dtype=x.dtype, device=x.device)
++        guarded = storage[:x.numel()].view_as(x)
++        guarded.copy_(x)
++        x = guarded
++    return torch.ops.custom.npu_hc_pre(x, hc_fn, hc_scale, hc_base, **kwargs)
++
++
+ def hc_pre(
+     x: torch.Tensor,
+     hc_fn: torch.Tensor,
+@@ -1910,7 +1928,7 @@ def hc_pre(
+     fn = hc_fn if hc_norm_weight is None else hc_fn * hc_norm_weight
+     residual_3d = x.view(s, hc_mult, hidden_size)
+     if is_npu():
+-        y, post, comb = torch.ops.custom.npu_hc_pre(
++        y, post, comb = _npu_hc_pre_with_tail_guard(
+             residual_3d,
+             fn,
+             hc_scale,
+@@ -2001,7 +2019,7 @@ def npu_hc_pre(
+     # fused kernel emits y in fp32 (sinkhorn iterates in fp32), so
+     # cast back to the input dtype before the downstream
+     # aclnnRmsNorm (which has no x=fp32 / gamma=bf16 overload).
+-    y, post, comb = torch.ops.custom.npu_hc_pre(
++    y, post, comb = _npu_hc_pre_with_tail_guard(
+         x,
+         hc_fn,
+         hc_scale,
+diff --git a/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py
+index 105034c03c..39777b9e47 100644
+--- a/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py
++++ b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py
+@@ -15,6 +15,7 @@ from __future__ import annotations
+ import threading
+ from contextlib import AbstractContextManager, contextmanager
+ from functools import partial
++import os
+ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+ 
+ import numpy as np
+@@ -108,6 +109,8 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
+             graph_ctx = partial(
+                 self._memory_saver_adapter.cuda_graph,
+                 tag=GPU_MEMORY_TYPE_CUDA_GRAPH,
++                # Preserve captured allocation contents across physical remapping.
++                enable_cpu_backup=os.environ.get("SGLANG_NPU_GRAPH_CPU_BACKUP") == "1",
+             )
+         else:
+             graph_ctx = torch.npu.graph
+diff --git a/python/sglang/srt/managers/scheduler_components/weight_updater.py b/python/sglang/srt/managers/scheduler_components/weight_updater.py
+index 71daf81b44..1b94e0f920 100644
+--- a/python/sglang/srt/managers/scheduler_components/weight_updater.py
++++ b/python/sglang/srt/managers/scheduler_components/weight_updater.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ import hashlib
+ import logging
++import os
+ import time
+ import traceback
+ from contextlib import contextmanager
+@@ -221,6 +222,14 @@ class SchedulerWeightUpdaterManager:
+         tags_to_offload = list(dict.fromkeys(tag for tag in tags if tag not in self.offload_tags))
+         if not tags_to_offload:
+             return ReleaseMemoryOccupationReqOutput()
++        if os.environ.get("SGLANG_NPU_PRE_OFFLOAD_FENCE") == "1":
++            device_module = torch.get_device_module()
++            if device_module is getattr(torch, "npu", None):
++                # Complete all TP work before any rank unmaps shared buffers.
++                device_module.synchronize()
++                torch.distributed.barrier(self.tp_cpu_group)
++                logger.info("NPU pre-offload fence complete: tags=%s", tags_to_offload)
++
+         for tag in tags_to_offload:
+             self.offload_tags.add(tag)
+ 

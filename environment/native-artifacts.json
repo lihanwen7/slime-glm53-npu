@@ -1,0 +1,23 @@
+[
+  {
+    "filename": "torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl",
+    "source_path": "/mnt/share/l00804615_glm53_cann930_new/.cache/glm53-main-npu-20261017_152622/tms-policy-wheels/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl",
+    "sha256": "f1be36ea7127462d5505fa035e02cc6c8d0ae9ff9677677afaedeb114f9bf01e",
+    "size": 36918,
+    "matches_installed_tms_policy_wheel": false
+  },
+  {
+    "filename": "triton_ascend_kernels-0.0.0-py3-none-any.whl",
+    "source_path": "/mnt/share/l00804615_glm53_cann930_new/.cache/glm53-main-npu-20261017_152622/wheels/triton_ascend_kernels-0.0.0-py3-none-any.whl",
+    "sha256": "a0cef357a849ba74f6deb66a993bc80b9fd19a4abef265e0fd500ad4b7ad013c",
+    "size": 168658,
+    "matches_installed_tms_policy_wheel": false
+  },
+  {
+    "filename": "torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl",
+    "source_path": "/mnt/share/l00804615_glm53_cann930_new/.cache/glm53-main-npu-20261017_152622/tms-patched-wheels/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl",
+    "sha256": "0f12a0d75af3b9eee5960a3211af57d764a5c7bc0c81065d7d6b1a83c6e130c0",
+    "size": 36791,
+    "matches_installed_tms_policy_wheel": false
+  }
+]

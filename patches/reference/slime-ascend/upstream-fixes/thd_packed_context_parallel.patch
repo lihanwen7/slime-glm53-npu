@@ -1,0 +1,226 @@
+From a0db0fa8b542afcc940822811c62760b1a3c8200 Mon Sep 17 00:00:00 2001
+From: lhw0909 <lhw0909@local.invalid>
+Date: Sat, 17 Oct 2026 15:04:59 +0800
+Subject: [PATCH] fix THD packed CP metadata while preserving upstream CPU
+ offsets
+
+---
+ slime/backends/megatron_utils/cp_utils.py | 126 ++++++++++++++++++++++
+ slime/backends/megatron_utils/data.py     |  18 +++-
+ 2 files changed, 142 insertions(+), 2 deletions(-)
+
+diff --git a/slime/backends/megatron_utils/cp_utils.py b/slime/backends/megatron_utils/cp_utils.py
+index cddc361d..a309190a 100644
+--- a/slime/backends/megatron_utils/cp_utils.py
++++ b/slime/backends/megatron_utils/cp_utils.py
+@@ -1,3 +1,4 @@
++import math
+ from collections.abc import Callable, Sequence
+ 
+ import torch
+@@ -10,6 +11,128 @@ from slime.data.tensor import TensorRef
+ _RoutedExpertsInput = torch.Tensor | TensorRef
+ 
+ 
++def pad_thd_sequences_for_cp(
++    tensors: list[torch.Tensor],
++    pad_value: int,
++    cp_size: int,
++    tp_size: int = 1,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Pad packed THD sequences while preserving the global CP metadata contract.
++
++    Every sequence keeps the established ``2 * cp_size`` alignment.  If the
++    resulting CP-local packed length is not divisible by tensor parallelism,
++    a separate physical-only sequence supplies the smallest additional
++    ``2 * cp_size`` block count needed for TP alignment.
++    """
++    assert tensors, "THD packing requires at least one sequence"
++    assert cp_size > 0
++    assert tp_size > 0
++
++    sequence_alignment = 2 * cp_size
++    cu_seqlens = [0]
++    cu_seqlens_padded = [0]
++    padded_tensors = []
++
++    for tensor in tensors:
++        seq_len = tensor.size(0)
++        padded_len = ((seq_len + sequence_alignment - 1) // sequence_alignment) * sequence_alignment
++        pad_len = padded_len - seq_len
++
++        cu_seqlens.append(cu_seqlens[-1] + seq_len)
++        cu_seqlens_padded.append(cu_seqlens_padded[-1] + padded_len)
++        padded_tensors.append(F.pad(tensor, (0, pad_len), value=pad_value) if pad_len else tensor)
++
++    # Each CP rank receives 1/cp_size of the physical packed stream.  Keep
++    # per-sequence CP alignment intact and minimally align that local total
++    # for TP, instead of over-padding every real sequence to CP*TP.
++    #
++    # The TP-only tail must be a separate padding sequence.  Extending the
++    # final real sequence changes its mirrored CP chunk size, while response
++    # extraction intentionally derives that chunk size from the real token
++    # length.  That makes the second chunk's logits and labels drift apart.
++    local_alignment = math.lcm(2, tp_size)
++    global_alignment = cp_size * local_alignment
++    tail_pad = (-cu_seqlens_padded[-1]) % global_alignment
++    if tail_pad:
++        padded_tensors.append(
++            torch.full(
++                (tail_pad,),
++                pad_value,
++                dtype=tensors[0].dtype,
++                device=tensors[0].device,
++            )
++        )
++        # This is a physical-only sequence: it owns no real tokens.
++        cu_seqlens.append(cu_seqlens[-1])
++        cu_seqlens_padded.append(cu_seqlens_padded[-1] + tail_pad)
++
++    packed = torch.cat(padded_tensors, dim=0)
++    assert packed.size(0) // cp_size % tp_size == 0, (
++        f"CP-local THD token count {packed.size(0) // cp_size} must be divisible by TP size {tp_size}"
++    )
++    device = packed.device
++    return (
++        packed,
++        torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
++        torch.tensor(cu_seqlens_padded, dtype=torch.int32, device=device),
++    )
++
++def get_thd_partitioned_indices(
++    cu_seqlens_padded: torch.Tensor,
++    total_tokens: int,
++    cp_size: int,
++    cp_rank: int,
++) -> torch.Tensor:
++    """Build THD CP partition indices matching Megatron/TE's mirrored block layout."""
++    assert cp_size > 1
++    assert 0 <= cp_rank < cp_size
++
++    indices = []
++
++    for i in range(cu_seqlens_padded.numel() - 1):
++        seq_start = int(cu_seqlens_padded[i].item())
++        seq_end = int(cu_seqlens_padded[i + 1].item())
++        seq_len = seq_end - seq_start
++
++        assert seq_len % (2 * cp_size) == 0, (
++            f"THD CP padded sequence length {seq_len} "
++            f"must be divisible by {2 * cp_size}"
++        )
++
++        chunk_len = seq_len // (2 * cp_size)
++        front_chunk = cp_rank
++        back_chunk = 2 * cp_size - cp_rank - 1
++        front_start = seq_start + front_chunk * chunk_len
++        back_start = seq_start + back_chunk * chunk_len
++
++        indices.append(
++            torch.arange(
++                front_start,
++                front_start + chunk_len,
++                dtype=torch.long,
++                device=cu_seqlens_padded.device,
++            )
++        )
++        indices.append(
++            torch.arange(
++                back_start,
++                back_start + chunk_len,
++                dtype=torch.long,
++                device=cu_seqlens_padded.device,
++            )
++        )
++
++    indices = torch.cat(indices)
++
++    assert int(cu_seqlens_padded[-1].item()) == total_tokens
++    assert indices.numel() == total_tokens // cp_size, (
++        f"local token count mismatch: "
++        f"{indices.numel()} != {total_tokens // cp_size}"
++    )
++
++    return indices
++
++
+ def get_logits_and_tokens_offset_with_cp(
+     total_length: int,
+     response_length: int,
+@@ -478,6 +601,9 @@ def prepare_routed_experts_for_routing_replay(
+     pad_size = mpu.get_tensor_model_parallel_world_size() * data_pad_size_multiplier
+     cp_size = mpu.get_context_parallel_world_size()
+     cp_rank = mpu.get_context_parallel_rank()
++    if cp_size > 1 and not allgather_cp:
++        # Match the physical-only tail used by get_batch's THD CP packing.
++        pad_size = math.lcm(2, mpu.get_tensor_model_parallel_world_size())
+     range_start = 0
+ 
+     if allgather_cp:
+diff --git a/slime/backends/megatron_utils/data.py b/slime/backends/megatron_utils/data.py
+index 3737453b..e4e5d353 100644
+--- a/slime/backends/megatron_utils/data.py
++++ b/slime/backends/megatron_utils/data.py
+@@ -9,7 +9,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
+ from slime.utils import accelerator
+ from slime.utils.types import RolloutBatch
+ 
+-from .cp_utils import slice_with_cp
++from .cp_utils import get_thd_partitioned_indices, pad_thd_sequences_for_cp, slice_with_cp
+ 
+ 
+ @dataclass
+@@ -65,6 +65,8 @@ def get_batch(
+ 
+     cp_size = mpu.get_context_parallel_world_size()
+     cp_rank = mpu.get_context_parallel_rank()
++    tp_size = mpu.get_tensor_model_parallel_world_size()
++    partition_indices = None
+ 
+     if allgather_cp:
+         # DSA mode: concatenate all sequences first, then slice once with CP.
+@@ -84,6 +86,12 @@ def get_batch(
+             cu_seqlens_list.append(cu_seqlens_list[-1] + pad)
+ 
+         tokens = tokens.chunk(cp_size, dim=0)[cp_rank]
++    elif cp_size > 1:
++        global_tokens, _, cu_seqlens_padded = pad_thd_sequences_for_cp(tokens, pad_token_id, cp_size, tp_size)
++        partition_indices = get_thd_partitioned_indices(cu_seqlens_padded, global_tokens.size(0), cp_size, cp_rank)
++        tokens = global_tokens.index_select(0, partition_indices)
++        cu_seqlens_list = cu_seqlens_padded.tolist()
++        pad = 0
+     else:
+         tokens = [slice_with_cp(t, pad_token_id) for t in tokens]
+ 
+@@ -107,6 +115,8 @@ def get_batch(
+     packed_seq_params = PackedSeqParamsWithCPUOffsets(
+         cu_seqlens_q=cu_seqlens,
+         cu_seqlens_kv=cu_seqlens,
++        cu_seqlens_q_padded=cu_seqlens,
++        cu_seqlens_kv_padded=cu_seqlens,
+         cu_seqlens_q_cpu=tuple(cu_seqlens_list),
+         max_seqlen_q=max_seqlen,
+         max_seqlen_kv=max_seqlen,
+@@ -129,7 +139,7 @@ def get_batch(
+         prompt_length = total_length - response_length
+         # Align mask to token stream positions (prompt_length-1 left pad, 1 right pad)
+         loss_mask = F.pad(loss_mask, (prompt_length - 1, 1), value=0)
+-        if allgather_cp:
++        if allgather_cp or cp_size > 1:
+             loss_masks.append(loss_mask)
+             continue
+         loss_mask = slice_with_cp(loss_mask, 0)
+@@ -141,6 +151,10 @@ def get_batch(
+         if pad != 0:
+             loss_masks = F.pad(loss_masks, (0, pad), value=0)
+         loss_masks = loss_masks.chunk(cp_size, dim=0)[cp_rank].unsqueeze(0)
++    elif cp_size > 1:
++        global_loss_masks, _, mask_offsets = pad_thd_sequences_for_cp(loss_masks, 0, cp_size, tp_size)
++        assert torch.equal(mask_offsets, cu_seqlens_padded), "Loss-mask/token THD CP offsets differ"
++        loss_masks = global_loss_masks.index_select(0, partition_indices).unsqueeze(0)
+     else:
+         loss_masks = torch.cat(loss_masks)
+         loss_masks = F.pad(loss_masks, (0, pad), value=0).unsqueeze(0)
+-- 
+2.43.0
+

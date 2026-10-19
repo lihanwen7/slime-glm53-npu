@@ -1,0 +1,164 @@
+# slime-ascend 权威补丁清单（按应用顺序）
+schema_version = 2
+upstream_version = "main"
+upstream_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+
+[[patches]]
+id = "slime:npu-compat:common"
+category = "npu-compat"
+target = "slime"
+file = "utils_common.patch"
+summary = "提供统一 NPU 运行时判定，作为 accelerator 与后端适配的公共依赖"
+issue = "SLIME-V032-001"
+base_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+sha256 = "8fc4e339dbd332d5176b7440c042057e3f25ce595bc3755f1e7ae2e0bed1a5d9"
+
+[[patches]]
+id = "slime:npu-compat:accelerator-backend"
+category = "npu-compat"
+target = "slime"
+file = "accelerator_npu_backend.patch"
+summary = "扩展主干内置 NPU 后端：Ray NPU 资源名与可选 MegatronAdaptor 引导"
+issue = "SLIME-V032-001"
+base_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+sha256 = "c782c7e021b9066cd605cac944b10182afce9a6cfd420db15a1ae1ead93d1207"
+
+[[patches]]
+id = "slime:npu-compat:runtime"
+category = "npu-compat"
+target = "slime"
+file = "accelerator_runtime_latest.patch"
+summary = "适配 Ray NPU 资源、Megatron/SGLang 启动、设备映射与权重同步；offload_rollout 保持上游参数语义"
+issue = "SLIME-V032-001"
+base_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+sha256 = "c8b5f55983688e3890dec1c5bb49fc009385200747f4f75d121eb48ebc8a2bdd"
+
+[[patches]]
+id = "slime:upstream-fix:thd-packed-cp-tp"
+category = "upstream-fixes"
+target = "slime"
+file = "thd_packed_context_parallel.patch"
+summary = "修复 THD packed CP/TP 元数据与路由尾部对齐，并保留主干 CPU offsets"
+issue = "SLIME-V032-002"
+base_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+sha256 = "571b2c14662a532f910e5bc76f3faeb8ee1bd34b5c0a75bb3811145ef0cc2469"
+
+[[patches]]
+id = "slime:upstream-fix:qwen3-5-conversion"
+category = "upstream-fixes"
+target = "slime"
+file = "qwen3_5.patch"
+summary = "保留主干 native GDN 映射；旧 Ascend Qwen3.5/VL 布局通过显式开关选择"
+issue = "SLIME-V032-013"
+base_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+sha256 = "cf5a44dbd26cbe445bed2accc544d1dad2d96b627880a12338123b1f4160a291"
+
+[[patches]]
+id = "slime:feature:coding-agent-docker-sandbox"
+category = "features"
+target = "slime"
+file = "coding-agent-rl-docker-sandbox.patch"
+summary = "为 coding_agent_rl 提供适合内网环境的 DockerSandbox"
+issue = "SLIME-V032-004"
+base_commit = "b2182cc5db977553455eb6e2e5c381eefbb35cfc"
+sha256 = "6713238c8e240f7d1641cbf2a49bb1754879babae73dfb932f0c1a8efb7e5b99"
+
+[[patches]]
+id = "mbridge:npu-device"
+category = "third_party"
+target = "mbridge"
+file = "mbridge/0001-fix-device-type.patch"
+summary = "修正 DeepSeek-V3 FP8 safetensor 转换中的设备类型，使其使用当前 accelerator 而不是写死 CUDA"
+issue = "SLIME-V031-002"
+base_commit = "89eb10887887bc74853f89a4de258c0702932a1c"
+sha256 = "6ac8dd299c561333b8aad18cadc0c53087e78b1f5c8cdddecdfd777a545d00a9"
+
+[[patches]]
+id = "megatron-bridge:slime-compat"
+category = "third_party"
+target = "megatron-bridge"
+file = "megatron-bridge/0001-ascend-megatron-bridge-patch-for-slime-v0.3.2.patch"
+summary = "适配 Slime 的 Ascend 参数映射和 checkpoint 转换接口；已移除不再需要的 MindSpeed 映射分支"
+issue = "SLIME-V031-002"
+base_commit = "35b4ebfc486fb15dcc0273ceea804c3606be948a"
+sha256 = "a5b2691015373b9584cf9f8b6d52b0c8fdb2149fa5615a659bb8e0be380dd5c9"
+
+[[patches]]
+id = "megatron-bridge:transformers-5-3"
+category = "third_party"
+target = "megatron-bridge"
+file = "megatron-bridge/0002-adapts-to-transformer-5.3.0-for-VL-model.patch"
+summary = "适配 Transformers 5.3.0 下 Qwen VL 模型配置和加载 API"
+issue = "SLIME-V031-002"
+base_commit = "35b4ebfc486fb15dcc0273ceea804c3606be948a"
+sha256 = "3130d123f696a80ff6867a534971e62e0c40966ac9dca6a9e52ceb3c6104a3d3"
+
+[[patches]]
+id = "megatron-bridge:qwen"
+category = "third_party"
+target = "megatron-bridge"
+file = "megatron-bridge/0003-megatron-Bridge-for-Qwen.patch"
+summary = "补齐 Qwen 系列模型在 Megatron-Bridge 上的转换兼容"
+issue = "SLIME-V031-002"
+base_commit = "35b4ebfc486fb15dcc0273ceea804c3606be948a"
+sha256 = "67466c7e166bd3362f5b9efaef9b7ad3cd40e1870d8bec27ecab59b330eefd13"
+
+[[patches]]
+id = "megatron:slime-basic"
+category = "third_party"
+target = "megatron"
+file = "megatron/0001-slime-v0.3.1-basic-patch.patch"
+summary = "提供 Slime v0.3.1 在 Ascend 上训练所需的 Megatron 基础适配"
+issue = "SLIME-V031-003"
+base_commit = "1dcf0dafa884ad52ffb243625717a3471643e087"
+sha256 = "e4d1a5bba535f490d2e41be5077305de74d626aff8890610d65c97481fa1e9ad"
+
+[[patches]]
+id = "megatron:attn-mask-checkpoint"
+category = "third_party"
+target = "megatron"
+file = "megatron/0002-Ascend-fix-attn-mask-type-checkpoint-save.patch"
+summary = "修复 Ascend attention mask 类型和 checkpoint 保存兼容"
+issue = "SLIME-V031-003"
+base_commit = "1dcf0dafa884ad52ffb243625717a3471643e087"
+sha256 = "530c005e2fac24bc7f289f2580242be5edf6b03bad2f383f8285dc390fa1ab1b"
+
+[[patches]]
+id = "sglang:slime-v0.5.15.post1-npu"
+category = "third_party"
+target = "sglang"
+file = "sglang/0001-slime-v0.5.15.post1-npu.patch"
+summary = "基于 SGLang v0.5.15.post1 的完整 Ascend NPU 适配栈；替代旧 v0.5.13 分拆补丁"
+issue = "SLIME-V031-004"
+base_commit = "0b3bb0cbe31873994c9f989fddfe2f87ca839fdd"
+sha256 = "4bd44185e764c2568f118269f2126ede5e1ee8f0aed8b781ddfc1ae24b06340e"
+
+[[patches]]
+id = "sglang:tms-cuda-graph-adapter"
+category = "third_party"
+target = "sglang"
+file = "sglang/0002-tms-adapter-forward-cuda-graph-arguments.patch"
+summary = "让 SGLang v0.5.15.post1 的 TMS 适配器透传位置参数和 NPU graph 新参数"
+issue = "SLIME-V031-004"
+base_commit = "0b3bb0cbe31873994c9f989fddfe2f87ca839fdd"
+sha256 = "d199ffd7516c46424ce7299d15025b72d1505f15dd214364c2725ee31005fd8c"
+
+[[patches]]
+id = "sgl-kernel-npu:tms-allocation-lifecycle"
+category = "third_party"
+target = "sgl-kernel-npu"
+file = "sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch"
+summary = "修复 colocate 场景 TorchMemorySaver pause/resume 后新分配的生命周期"
+issue = "SLIME-V031-005"
+base_commit = "9765e27532b8f854717eba1d3fb9a0bb97a0c887"
+sha256 = "99b5c11fddb35dfdf412d524755727ba25cacb839dea28f60d117c5b4ebc18e2"
+
+[[patches]]
+id = "sgl-kernel-npu:tms-sglang-graph-api"
+category = "third_party"
+target = "sgl-kernel-npu"
+file = "sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch"
+summary = "补齐 SGLang 需要的 auto_dispatch_capture 参数，并确保子进程以 preload hook 模式初始化；2026.6.2 release 的 wheel metadata 为 2026.6.1，TMS 必须在目标 aarch64/x86_64 架构上从 9765e275 重建"
+issue = "SLIME-V031-005"
+base_commit = "9765e27532b8f854717eba1d3fb9a0bb97a0c887"
+sha256 = "0ebd52fbf54187ad11d8ae121aa17a1c572568856e02b0fc83ea8f068e6c2333"

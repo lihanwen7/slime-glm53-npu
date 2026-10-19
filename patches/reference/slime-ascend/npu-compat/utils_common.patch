@@ -1,0 +1,32 @@
+From 5233571f3181c932acf410783a0c48bd0b97dd86 Mon Sep 17 00:00:00 2001
+From: slime-ascend <slime-ascend@local>
+Date: Fri, 4 Sep 2026 07:45:19 +0000
+Subject: [PATCH] add common NPU runtime detection
+
+---
+ slime/utils/common.py | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+ create mode 100644 slime/utils/common.py
+
+diff --git a/slime/utils/common.py b/slime/utils/common.py
+new file mode 100644
+index 00000000..3fde3f69
+--- /dev/null
++++ b/slime/utils/common.py
+@@ -0,0 +1,13 @@
++import torch
++
++
++def is_npu() -> bool:
++    if not hasattr(torch, "npu"):
++        return False
++
++    if not torch.npu.is_available():
++        raise RuntimeError(
++            "torch_npu detected, but NPU device is not available or visible."
++        )
++
++    return True
+-- 
+2.43.0
+

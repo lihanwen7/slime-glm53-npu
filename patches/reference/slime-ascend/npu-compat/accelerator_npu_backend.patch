@@ -1,0 +1,49 @@
+From 6205838ed8941e418df34ba9f8154697bc270b3f Mon Sep 17 00:00:00 2001
+From: lhw0909 <lhw0909@local.invalid>
+Date: Sat, 17 Oct 2026 15:04:24 +0800
+Subject: [PATCH] [Ascend] extend upstream NPU backend with Ray resource and
+ Megatron adapter
+
+---
+ slime/utils/accelerator/npu.py | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/slime/utils/accelerator/npu.py b/slime/utils/accelerator/npu.py
+index 5fc613e2..22e4f10f 100644
+--- a/slime/utils/accelerator/npu.py
++++ b/slime/utils/accelerator/npu.py
+@@ -6,6 +6,8 @@ Importing this module never imports ``torch_npu``. The runtime bootstrap in
+ 
+ from __future__ import annotations
+ 
++import importlib
++
+ from typing import Any
+ 
+ import torch
+@@ -27,6 +29,7 @@ class NPUAccelerator(TorchAccelerator):
+     name = "npu"
+     device_type = "npu"
+     communication_backend_name = "hccl"
++    ray_resource_name = "NPU"
+ 
+     @property
+     def visible_devices_env(self) -> str:
+@@ -41,6 +44,14 @@ class NPUAccelerator(TorchAccelerator):
+     def is_available(self) -> bool:
+         return is_npu_available()
+ 
++    def post_import_torch(self) -> None:
++        """Load the optional Ascend Megatron adapter after torch_npu bootstrap."""
++        try:
++            importlib.import_module("megatron_adaptor")
++        except ModuleNotFoundError as exc:
++            if exc.name != "megatron_adaptor":
++                raise
++
+     def weight_update_backend(self, default: str = "nccl") -> str:
+         return "cpu:gloo,npu:hccl" if default == "nccl" else default
+ 
+-- 
+2.43.0
+

@@ -1,3 +1,5 @@
+> GLM5.3 Flash single-node NPU integration snapshot: see [deployment/README.md](deployment/README.md) for migration, dependency patches, machine configuration and validation limits.
+
 # slime
 
 [中文版](./README_zh.md)

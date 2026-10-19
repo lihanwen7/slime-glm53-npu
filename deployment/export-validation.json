@@ -1,0 +1,9 @@
+{
+  "dependency_replay": "PASS",
+  "dependency_patched_file_hashes": "PASS",
+  "patch_tool_check_apply_repeat": "PASS",
+  "portable_launcher_dry_run": "PASS",
+  "bash_and_embedded_python_syntax": "PASS",
+  "runtime_source_matches_export": "PASS",
+  "new_rl_or_npu_runs_started": false
+}

@@ -1,0 +1,19 @@
+diff --git a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
+index 9066a40..dac2921 100644
+--- a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
++++ b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
+@@ -81,6 +81,14 @@ class TorchMemorySaver:
+         assert (
+             self._impl_ctor_kwargs is not None
+         ), "Cannot configure after initialization"
++        # Keep the caller's explicit graph-compatible allocator policy through
++        # optional imports that set their own default mode. Opt-in only.
++        if (
++            hook_mode == "torch"
++            and os.environ.get("TMS_PRESERVE_PRELOAD_MODE") == "1"
++            and os.environ.get("TMS_HOOK_MODE") == "preload"
++        ):
++            hook_mode = "preload"
+         self._impl_ctor_kwargs["hook_mode"] = hook_mode
+ 
+     def _ensure_initialized(self):

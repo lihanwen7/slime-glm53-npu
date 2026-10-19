@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "slime_upstream_commit": "b2182cc5db977553455eb6e2e5c381eefbb35cfc",
+  "slime_ascend_ported_head": "ed5f0a96199048df3ff14a41764a9c6a1a0aa4e2",
+  "slime_runtime_snapshot_commit": "1fe9a370c15ee3234851bc251d12507a97ac101f",
+  "outer_ascend_source": {
+    "url": "https://gitcode.com/Ascend/slime-ascend.git",
+    "commit": "282b6eb6409a0821293400fba3ddfe52fb5f9e01"
+  },
+  "repositories": [
+    {
+      "name": "sglang",
+      "directory": "sglang",
+      "url": "https://github.com/sgl-project/sglang.git",
+      "commit": "872f1721cc6d4679f008167386ec6699a6580102",
+      "patches": [
+        {
+          "file": "patches/third_party/sglang/0001-tms-adapter-arguments.patch",
+          "sha256": "d199ffd7516c46424ce7299d15025b72d1505f15dd214364c2725ee31005fd8c",
+          "origin": "existing-ascend-patch",
+          "description": "Forward TMS graph and CPU-backup arguments."
+        },
+        {
+          "file": "patches/third_party/sglang/0002-offload-idempotence-port.patch",
+          "sha256": "8ff12230636918a45e60d4d6d1ea90b2e9c8ae52d0488486be621698de7da478",
+          "origin": "ported-existing-ascend-logic",
+          "description": "Port the idempotent offload/resume subset onto this newer SGLang base."
+        },
+        {
+          "file": "patches/third_party/sglang/0003-glm53-local-fixes-and-opt-in-diagnostics.patch",
+          "sha256": "c0c0c7519e9e1ed08587f2dc655aeba01989f08f354f8fabf868abecf27a443b",
+          "origin": "new-local-fixes",
+          "description": "HcPreSinkhorn backing-storage guard; opt-in graph CPU backup and pre-offload fence."
+        }
+      ],
+      "expected_files": {
+        "python/sglang/kernels/ops/layernorm/mhc.py": "4f27551edef34ef255075d298b92e94e69fc3461e00966a44d01a06f69613fb1",
+        "python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py": "65da3ece0782f3f3d2732b49cd10d5fd1ae858f1eaed3f0a4781ff7de39b7e6a",
+        "python/sglang/srt/managers/scheduler_components/weight_updater.py": "5cc13e8b20fbfcff4fc8685cca2f35b11fdb2fbdb4e23e7506468a18057985a3",
+        "python/sglang/srt/utils/torch_memory_saver_adapter.py": "d8a7daf1ecb83fec76c81d4cd83f3f419dc949fd8d7c55927b3fa9464db31b20"
+      }
+    },
+    {
+      "name": "sgl-kernel-npu",
+      "directory": "sgl-kernel-npu-src",
+      "url": "https://github.com/sgl-project/sgl-kernel-npu.git",
+      "commit": "9765e27532b8f854717eba1d3fb9a0bb97a0c887",
+      "patches": [
+        {
+          "file": "patches/third_party/sgl-kernel-npu/0001-fix-torch-memory-saver-allocation-lifecycle.patch",
+          "sha256": "99b5c11fddb35dfdf412d524755727ba25cacb839dea28f60d117c5b4ebc18e2",
+          "origin": "existing-ascend-patch",
+          "description": "0001-fix-torch-memory-saver-allocation-lifecycle.patch"
+        },
+        {
+          "file": "patches/third_party/sgl-kernel-npu/0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch",
+          "sha256": "0ebd52fbf54187ad11d8ae121aa17a1c572568856e02b0fc83ea8f068e6c2333",
+          "origin": "existing-ascend-patch",
+          "description": "0002-fix-tms-sglang-cuda-graph-api-and-preload-mode.patch"
+        },
+        {
+          "file": "patches/third_party/sgl-kernel-npu/0003-preserve-explicit-preload-mode.patch",
+          "sha256": "7cf7584f35c723c53c6cca8f8c2ff55dc1edede54667d8e3ad2c1402a6c880a7",
+          "origin": "new-local-fix",
+          "description": "Preserve explicitly requested preload allocator mode across optional Megatron imports."
+        }
+      ],
+      "expected_files": {
+        "contrib/torch_memory_saver/README.md": "79c66d42276b91bac92a2984cf8c6ad362091f0ab2a701a1d5f74aeb027cdd46",
+        "contrib/torch_memory_saver/csrc/api_forwarder.cpp": "bf526a017bc1c3db0e0d55871f47e19c17a19dda887a98c79dab3236dadb4dbe",
+        "contrib/torch_memory_saver/csrc/api_forwarder.h": "34417d12f955e6b49e90818d50e6837348ff1b99eb3a3dabdbf8ab0a33a7a8a0",
+        "contrib/torch_memory_saver/csrc/core.cpp": "fd6df705c1b4c47093de0efefc18f1b25d82d8ba7abce1361d7324d0a5039a9f",
+        "contrib/torch_memory_saver/csrc/core.h": "4d05d8bbeac7e37ac4be6a0818d9d482a7a972c190fb2b934659167f8a2b3be4",
+        "contrib/torch_memory_saver/csrc/entrypoint.cpp": "e7950638f11ffc91d684cc1b6f2285e793be7644668aacd4b7388615453a8acb",
+        "contrib/torch_memory_saver/csrc/utils.h": "4869c4f82714525c189fa7f58b06e8c0495eedf5d3da5975b1a6462f70414e9e",
+        "contrib/torch_memory_saver/python/setup.py": "42f9272e0b21fedf310883fd1911855761b3d9d5118fe4970a08ab7c51b49d27",
+        "contrib/torch_memory_saver/python/torch_memory_saver/__init__.py": "f6253f4254dee8ec4c479fceb524549afafa96dce4d78f468e88d8bc6ef8b1a8",
+        "contrib/torch_memory_saver/python/torch_memory_saver/binary_wrapper.py": "7745eed9504b04ff12274328e6db11e37bf42ca8fb18f0950f41578922584b99",
+        "contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py": "8e8ed297fa215706174229acf9aa6416d3690c51a75b8801c973b35e05cc015b",
+        "contrib/torch_memory_saver/python/torch_memory_saver/hooks/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "contrib/torch_memory_saver/python/torch_memory_saver/hooks/base.py": "eb5eab2b896dc7e64e2f8f94aef795425bac0e6c7dab657887c2e6d0eb54dac6",
+        "contrib/torch_memory_saver/python/torch_memory_saver/hooks/mode_preload.py": "e642444fdbf1cbef49ec5e99acbb8b7526ffecf45ad140af24c8f124a04e60a3",
+        "contrib/torch_memory_saver/python/torch_memory_saver/hooks/mode_torch.py": "a8fd37ddd4d97e3224f791e14a40d3180b71cdeee62363be5e4fb243de3593b3",
+        "contrib/torch_memory_saver/python/torch_memory_saver/testing_utils.py": "2623e5f06de8245a92625cb7ef94b8523726ffbbc0d2778e1e660843617909b8",
+        "contrib/torch_memory_saver/python/torch_memory_saver/utils.py": "704745db1ddc707368d41f9c0edbe6074137ca91a182001e9e196e79f10868de",
+        "contrib/torch_memory_saver/test/cpu_backup.py": "4f2fa9ba316690732bf9b6f2c095689e3b10a0b6b9e8b61f1e098bc82f6e745b",
+        "contrib/torch_memory_saver/test/cuda_graph.py": "b34f5e25b419fa1b2e6be0518783f0ebe8968770e190bb04e4627859f5a21915",
+        "contrib/torch_memory_saver/test/multi_device.py": "0460c1d206fbcb2d8a78ff356bdfd3de82b54936b9cb9832a79fd8ed3642647c",
+        "contrib/torch_memory_saver/test/rl_example.py": "8a97c9d828f2467cb112a5885af8c00a2ff189d43963121f655ce581aaf705de",
+        "contrib/torch_memory_saver/test/simple.py": "dfd9367d2dbedcc79d5a82bd966292f8e51df27e0de64b78767f5c9574f14b2d",
+        "contrib/torch_memory_saver/test/training_engine.py": "e5d89a0c2f8c9e2e1cb73b4313df487031892724deb2bca4af265e6c458ed927"
+      },
+      "build_subdirectory": "contrib/torch_memory_saver/python",
+      "scope": "Only rebuild Torch Memory Saver. Do not rebuild/install all sgl-kernel-npu kernels from this checkout."
+    },
+    {
+      "name": "Megatron-LM",
+      "directory": "Megatron-LM",
+      "url": "https://github.com/NVIDIA/Megatron-LM.git",
+      "commit": "4b4acac9a1d28ea6829c8d4f566d75698a21249d",
+      "patches": []
+    },
+    {
+      "name": "MegatronAdaptor",
+      "directory": "MegatronAdaptor",
+      "url": "https://gitcode.com/Ascend/MegatronAdaptor.git",
+      "commit": "f710cd34ed54eca6b7b7ae1b51a19840d15aedbc",
+      "patches": []
+    },
+    {
+      "name": "TransformerEngineNPU",
+      "directory": "TransformerEngineNPU",
+      "url": "https://gitcode.com/Ascend/TransformerEngineNPU.git",
+      "commit": "fd09a928c1e2c74fa13f08dd96a9d7c68cabb48f",
+      "patches": []
+    },
+    {
+      "name": "Megatron-Bridge",
+      "directory": "Megatron-Bridge",
+      "url": "https://github.com/fzyzcjy/Megatron-Bridge.git",
+      "commit": "35b4ebfc486fb15dcc0273ceea804c3606be948a",
+      "patches": []
+    },
+    {
+      "name": "mbridge",
+      "directory": "mbridge",
+      "url": "https://github.com/ISEEKYAN/mbridge.git",
+      "commit": "89eb10887887bc74853f89a4de258c0702932a1c",
+      "patches": []
+    }
+  ]
+}

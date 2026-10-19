@@ -1,0 +1,76 @@
+From 3e6fe1dd318544782213caadc1724a5069b79288 Mon Sep 17 00:00:00 2001
+From: gcw_8jFUVqc5 <caowuke@huawei.com>
+Date: Fri, 4 Sep 2026 08:11:16 +0000
+Subject: [PATCH] align TMS graph API and preload mode
+
+---
+ .../python/torch_memory_saver/entrypoint.py           |  9 ++++++++-
+ .../python/torch_memory_saver/hooks/mode_preload.py   | 11 ++++++-----
+ 2 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
+index b14c561..9066a40 100644
+--- a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
++++ b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
+@@ -33,6 +33,7 @@ class TorchMemorySaver:
+         cuda_graph,
+         pool=None,
+         stream=None,
++        auto_dispatch_capture=False,
+         capture_error_mode="global",
+         tag: str = _TAG_DEFAULT,
+         enable_cpu_backup: bool = False,
+@@ -43,6 +44,7 @@ class TorchMemorySaver:
+             cuda_graph=cuda_graph,
+             pool=pool,
+             stream=stream,
++            auto_dispatch_capture=auto_dispatch_capture,
+             capture_error_mode=capture_error_mode,
+             tag=tag,
+             enable_cpu_backup=enable_cpu_backup,
+@@ -112,6 +114,7 @@ class _TorchMemorySaverImpl:
+         cuda_graph,
+         pool,
+         stream,
++        auto_dispatch_capture,
+         capture_error_mode,
+         tag: str,
+         enable_cpu_backup: bool,
+@@ -120,7 +123,11 @@ class _TorchMemorySaverImpl:
+             self._hook_mode == "preload"
+         ), "Only hook_mode=preload supports pauseable CUDA Graph currently"
+         with torch.npu.graph(
+-            cuda_graph, pool=pool, stream=stream, capture_error_mode=capture_error_mode
++            cuda_graph,
++            pool=pool,
++            stream=stream,
++            auto_dispatch_capture=auto_dispatch_capture,
++            capture_error_mode=capture_error_mode,
+         ):
+             with self._with_region_config(tag=tag, enable_cpu_backup=enable_cpu_backup):
+                 yield
+diff --git a/contrib/torch_memory_saver/python/torch_memory_saver/hooks/mode_preload.py b/contrib/torch_memory_saver/python/torch_memory_saver/hooks/mode_preload.py
+index e4f3135..8bddc9f 100644
+--- a/contrib/torch_memory_saver/python/torch_memory_saver/hooks/mode_preload.py
++++ b/contrib/torch_memory_saver/python/torch_memory_saver/hooks/mode_preload.py
+@@ -24,11 +24,12 @@ class HookUtilModePreload(HookUtilBase):
+ @contextmanager
+ def configure_subprocess():
+     """Configure environment variables for subprocesses. Only needed for hook_mode=preload."""
+-    with _change_env(
+-        "LD_PRELOAD",
+-        str(get_binary_path_from_package("torch_memory_saver_hook_mode_preload")),
+-    ):
+-        yield
++    with _change_env("TMS_HOOK_MODE", "preload"):
++        with _change_env(
++            "LD_PRELOAD",
++            str(get_binary_path_from_package("torch_memory_saver_hook_mode_preload")),
++        ):
++            yield
+ 
+ 
+ @contextmanager
+-- 
+2.34.1
+

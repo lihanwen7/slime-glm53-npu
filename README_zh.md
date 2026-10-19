@@ -1,3 +1,5 @@
+> GLM5.3 Flash 单机 NPU 私仓：迁移、依赖补丁、机器配置和验证边界见 [deployment/README.md](deployment/README.md)。
+
 # slime
 
 [English](./README.md)

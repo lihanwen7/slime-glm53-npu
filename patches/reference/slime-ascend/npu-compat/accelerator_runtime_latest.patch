@@ -1,0 +1,316 @@
+From f874dfc2830531823b9625bb9af35f55e328ef4b Mon Sep 17 00:00:00 2001
+From: lhw0909 <lhw0909@local.invalid>
+Date: Sat, 17 Oct 2026 15:04:24 +0800
+Subject: [PATCH] [Ascend] port NPU runtime scheduling to main without
+ reverting recovery ownership
+
+---
+ slime/backends/megatron_utils/__init__.py   |  4 ++-
+ slime/backends/sglang_utils/engine_group.py |  3 +-
+ slime/ray/actor_group.py                    |  5 ++--
+ slime/ray/placement_group.py                | 18 ++++++-----
+ slime/ray/train_actor.py                    |  6 +++-
+ slime/utils/accelerator/__init__.py         | 12 ++++++++
+ slime/utils/accelerator/base.py             |  1 +
+ slime/utils/accelerator/cuda.py             |  8 ++++-
+ slime/utils/external_utils/command_utils.py | 33 ++++++++++++++++++---
+ slime/utils/memory_utils.py                 |  2 +-
+ 10 files changed, 74 insertions(+), 18 deletions(-)
+
+diff --git a/slime/backends/megatron_utils/__init__.py b/slime/backends/megatron_utils/__init__.py
+index 55372a86..4dea1708 100644
+--- a/slime/backends/megatron_utils/__init__.py
++++ b/slime/backends/megatron_utils/__init__.py
+@@ -4,7 +4,9 @@ import torch
+ 
+ from slime.utils import accelerator
+ 
+-accelerator.initialize_accelerator()
++selected_accelerator = accelerator.initialize_accelerator()
++if selected_accelerator is not None:
++    selected_accelerator.post_import_torch()
+ 
+ try:
+     import deep_ep
+diff --git a/slime/backends/sglang_utils/engine_group.py b/slime/backends/sglang_utils/engine_group.py
+index 8ad5c860..e803cd99 100644
+--- a/slime/backends/sglang_utils/engine_group.py
++++ b/slime/backends/sglang_utils/engine_group.py
+@@ -11,6 +11,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+ from slime.backends.sglang_utils.server_control import unregister_worker
+ from slime.backends.sglang_utils.sglang_config import ServerGroupConfig
+ from slime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
++from slime.utils import accelerator
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -207,7 +208,7 @@ class ServerGroup:
+             }
+             rollout_engine = RolloutRayActor.options(
+                 num_cpus=num_cpus,
+-                num_gpus=num_gpus,
++                **accelerator.ray_remote_options(num_gpus),
+                 scheduling_strategy=scheduling_strategy,
+                 runtime_env={
+                     "env_vars": add_default_ray_env_vars(env_vars),
+diff --git a/slime/ray/actor_group.py b/slime/ray/actor_group.py
+index ce6e6d03..894caffb 100644
+--- a/slime/ray/actor_group.py
++++ b/slime/ray/actor_group.py
+@@ -10,6 +10,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+ 
+ from slime.ray.training_recovery import configure_recovery_checkpoint, training_recovery_enabled
+ from slime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
++from slime.utils import accelerator
+ from slime.utils.weight_sync import should_flush_cache
+ 
+ 
+@@ -110,7 +111,7 @@ class RayTrainGroup:
+             actor_impl = self._actor_cls
+ 
+         actor_options = {
+-            "num_gpus": 1,
++            **accelerator.ray_remote_options(1),
+             "runtime_env": {"env_vars": add_default_ray_env_vars(env_vars)},
+         }
+         if getattr(self.args, "rollout_data_transport", "object-store") == "nixl":
+@@ -123,7 +124,7 @@ class RayTrainGroup:
+         for rank in range(world_size):
+             actor = TrainRayActor.options(
+                 num_cpus=num_gpus_per_actor,
+-                num_gpus=num_gpus_per_actor,
++                **accelerator.ray_remote_options(num_gpus_per_actor),
+                 scheduling_strategy=PlacementGroupSchedulingStrategy(
+                     placement_group=pg,
+                     placement_group_bundle_index=reordered_bundle_indices[rank],
+diff --git a/slime/ray/placement_group.py b/slime/ray/placement_group.py
+index bbee464c..15599d04 100644
+--- a/slime/ray/placement_group.py
++++ b/slime/ray/placement_group.py
+@@ -11,14 +11,16 @@ from slime.utils.cleanup import Cleanup
+ 
+ from .actor_group import RayTrainGroup
+ from .utils import add_default_ray_env_vars
++from slime.utils import accelerator
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+-@ray.remote(num_gpus=1)
++@ray.remote
+ class InfoActor:
+     def get_ip_and_gpu_id(self):
+-        return ray.util.get_node_ip_address(), ray.get_gpu_ids()[0]
++        resource_name = accelerator.ray_resource_name()
++        return ray.util.get_node_ip_address(), ray.get_runtime_context().get_accelerator_ids()[resource_name][0]
+ 
+ 
+ def sort_key(x):
+@@ -47,7 +49,8 @@ def _create_placement_group(num_gpus):
+     if num_gpus == 0:
+         return None, [], []
+ 
+-    bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
++    device_name = accelerator.ray_resource_name()
++    bundles = [{device_name: 1, "CPU": 1} for _ in range(num_gpus)]
+     pg = placement_group(bundles, strategy="PACK")
+     num_bundles = len(bundles)
+ 
+@@ -62,11 +65,11 @@ def _create_placement_group(num_gpus):
+     log_interval = 30
+     while not ray.wait([ready_ref], timeout=log_interval)[0]:
+         elapsed += log_interval
+-        total = ray.cluster_resources().get("GPU", 0)
+-        available = ray.available_resources().get("GPU", 0)
++        total = ray.cluster_resources().get(device_name, 0)
++        available = ray.available_resources().get(device_name, 0)
+         logger.info(
+-            f"Waiting for placement group of {num_gpus} GPUs (elapsed {elapsed}s): "
+-            f"{total:g} GPUs registered with Ray, {available:g} available."
++            f"Waiting for placement group of {num_gpus} {device_name}s (elapsed {elapsed}s): "
++            f"{total:g} {device_name}s registered with Ray, {available:g} available."
+         )
+ 
+     # use info actor to get the GPU id
+@@ -74,6 +77,7 @@ def _create_placement_group(num_gpus):
+     for i in range(num_bundles):
+         info_actors.append(
+             InfoActor.options(
++                **accelerator.ray_remote_options(1),
+                 scheduling_strategy=PlacementGroupSchedulingStrategy(
+                     placement_group=pg,
+                     placement_group_bundle_index=i,
+diff --git a/slime/ray/train_actor.py b/slime/ray/train_actor.py
+index e91bc5a2..e6f1730c 100644
+--- a/slime/ray/train_actor.py
++++ b/slime/ray/train_actor.py
+@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
+ 
+ 
+ def get_local_gpu_id():
+-    return accelerator.resolve_visible_device_id(ray.get_gpu_ids()[0])
++    resource_name = accelerator.ray_resource_name()
++    resource_ids = ray.get_runtime_context().get_accelerator_ids().get(resource_name, [])
++    if not resource_ids:
++        raise RuntimeError(f"Ray did not assign a {resource_name} accelerator to this actor")
++    return accelerator.resolve_visible_device_id(resource_ids[0])
+ 
+ 
+ class TrainRayActor(RayActor):
+diff --git a/slime/utils/accelerator/__init__.py b/slime/utils/accelerator/__init__.py
+index 98127eac..eb517f2c 100644
+--- a/slime/utils/accelerator/__init__.py
++++ b/slime/utils/accelerator/__init__.py
+@@ -525,5 +525,17 @@ def visible_devices_env_key() -> str:
+     return _backend().visible_devices_env
+ 
+ 
++def ray_resource_name() -> str:
++    return _backend().ray_resource_name
++
++
++def ray_remote_options(amount: float) -> dict[str, Any]:
++    """Return Ray actor options for the selected accelerator resource."""
++    resource_name = ray_resource_name()
++    if resource_name == "GPU":
++        return {"num_gpus": amount}
++    return {"resources": {resource_name: amount}}
++
++
+ def resolve_visible_device_id(physical_device_id: int | float | str) -> int:
+     return _backend().resolve_visible_device_id(physical_device_id)
+diff --git a/slime/utils/accelerator/base.py b/slime/utils/accelerator/base.py
+index 9d760c61..3c9d586b 100644
+--- a/slime/utils/accelerator/base.py
++++ b/slime/utils/accelerator/base.py
+@@ -20,6 +20,7 @@ class Accelerator(abc.ABC):
+     name: str
+     device_type: str
+     communication_backend_name: str
++    ray_resource_name: str = "GPU"
+ 
+     @abc.abstractmethod
+     def is_available(self) -> bool:
+diff --git a/slime/utils/accelerator/cuda.py b/slime/utils/accelerator/cuda.py
+index c9fca2af..f4fa059e 100644
+--- a/slime/utils/accelerator/cuda.py
++++ b/slime/utils/accelerator/cuda.py
+@@ -33,7 +33,13 @@ class CUDAAccelerator(TorchAccelerator):
+         if capability == "bf16":
+             checker = getattr(torch.cuda, "is_bf16_supported", None)
+             return bool(checker and checker())
+-        if capability in {"cuda_int4_extension", "sglang_fp8_utils", "strict_fp32_logits", "triton_kernels"}:
++        if capability in {
++            "cuda_int4_extension",
++            "host_empty_cache",
++            "sglang_fp8_utils",
++            "strict_fp32_logits",
++            "triton_kernels",
++        }:
+             return True
+         if capability == "requires_cpu_initialization":
+             return torch.version.hip is not None
+diff --git a/slime/utils/external_utils/command_utils.py b/slime/utils/external_utils/command_utils.py
+index 656bc4a8..b85520c5 100644
+--- a/slime/utils/external_utils/command_utils.py
++++ b/slime/utils/external_utils/command_utils.py
+@@ -13,6 +13,7 @@ from pathlib import Path
+ 
+ from slime.utils.external_utils.typer_utils import dataclass_cli
+ from slime.utils.misc import exec_command
++from slime.utils import accelerator
+ 
+ _ = exec_command, dataclass_cli
+ 
+@@ -53,7 +54,7 @@ def convert_checkpoint(
+ 
+     exec_command(
+         f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
+-        f"PYTHONPATH={repo_base_dir}:/root/Megatron-LM:${{PYTHONPATH:-}} "
++        f"PYTHONPATH=/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:${{PYTHONPATH:-}} "
+         f"torchrun "
+         f"--nproc-per-node {num_gpus_per_node} "
+         f"{multinode_args}"
+@@ -106,6 +107,8 @@ def execute_train(
+         config = ExecuteTrainConfig()
+     external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
+     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
++    ray_port = int(os.environ.get("SLIME_RAY_PORT", "6379"))
++    ray_dashboard_port = int(os.environ.get("SLIME_RAY_DASHBOARD_PORT", "8265"))
+ 
+     # Launching another trainer must preserve independently owned serving.
+     # Successful training cleans up its own resources; failures retain them.
+@@ -120,10 +123,17 @@ def execute_train(
+             == 0
+         )
+         if not ray_running:
++            resource_name = accelerator.ray_resource_name()
++            device_resources = (
++                f"--num-gpus {num_gpus_per_node}"
++                if resource_name == "GPU"
++                else f"--resources='{{\"{resource_name}\": {num_gpus_per_node}}}'"
++            )
+             exec_command(
+                 # will prevent ray from buffering stdout/stderr
+                 f"export PYTHONUNBUFFERED=1 && "
+-                f"ray start --head --node-ip-address {master_addr} --num-gpus {num_gpus_per_node} --disable-usage-stats"
++                f"ray start --head --node-ip-address {master_addr} --port {ray_port} "
++                f"--dashboard-port {ray_dashboard_port} {device_resources} --disable-usage-stats"
+             )
+ 
+     if (f := before_ray_job_submit) is not None:
+@@ -132,13 +142,28 @@ def execute_train(
+     runtime_env_json = json.dumps(
+         {
+             "env_vars": {
+-                "PYTHONPATH": "/root/Megatron-LM/",
++                "PYTHONPATH": f"/workspace/Megatron-LM:/workspace/Megatron-Bridge/src:/workspace/MegatronAdaptor:/workspace/TransformerEngineNPU:{os.environ.get('PYTHONPATH', '')}",
+                 "RAY_USE_UVLOOP": "0",
++                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
++                "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
++                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                 "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                 "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
+                 "no_proxy": f"127.0.0.1,{master_addr}",
+                 # This is needed by megatron / torch distributed in multi-node setup
+                 "MASTER_ADDR": master_addr,
++                "HCCL_DETERMINISTIC": "True",
++                "HCCL_BUFFSIZE": os.environ.get("HCCL_BUFFSIZE", "512"),
++                "LCCL_DETERMINISTIC": "1",
++                "CLOSE_MATMUL_K_SHIFT": "1",
++                "ATB_LLM_LCOC_ENABLE": "0",
++                "ASCEND_COREDUMP_SIGNAL": os.environ.get("ASCEND_COREDUMP_SIGNAL", "none"),
++                "HCCL_HOST_SOCKET_PORT_RANGE": os.environ.get(
++                    "HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050"
++                ),
++                "HCCL_NPU_SOCKET_PORT_RANGE": os.environ.get(
++                    "HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050"
++                ),
+                 **(
+                     {
+                         "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "1",
+@@ -164,7 +189,7 @@ def execute_train(
+         exec_command(
+             f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && "
+             f"{cmd_megatron_model_source}"
+-            f'ray job submit --address="http://127.0.0.1:8265" '
++            f'ray job submit --address="http://127.0.0.1:{ray_dashboard_port}" '
+             f"--runtime-env-json='{runtime_env_json}' "
+             f"-- python3 train.py "
+             f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
+diff --git a/slime/utils/memory_utils.py b/slime/utils/memory_utils.py
+index 4bcb6759..8672e260 100644
+--- a/slime/utils/memory_utils.py
++++ b/slime/utils/memory_utils.py
+@@ -44,7 +44,7 @@ def clear_memory(clear_host_memory: bool = False):
+     accelerator.synchronize()
+     gc.collect()
+     accelerator.empty_cache()
+-    if clear_host_memory:
++    if clear_host_memory and accelerator.supports("host_empty_cache"):
+         torch._C._host_emptyCache()
+ 
+ 
+-- 
+2.43.0
+
