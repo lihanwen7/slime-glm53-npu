@@ -3,6 +3,8 @@ import copy
 import inspect
 import json
 import logging
+import math
+import os
 import uuid
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
@@ -161,7 +163,30 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    url = f"{router_url}/generate"
+    if args.use_rollout_routing_replay:
+        # This installed gateway drops return_routed_experts during request
+        # deserialization. With exactly one regular worker, direct dispatch
+        # preserves the R3 payload without changing worker selection.
+        workers = (await get(f"{router_url}/workers"))["workers"]
+        if len(workers) == 1 and workers[0].get("worker_type", "regular") == "regular":
+            url = f"{workers[0]['url'].rstrip('/')}/generate"
+        elif os.environ.get("GLM53_R3_DIRECT_WORKERS") == "1":
+            # Multi-engine compatibility for gateways that drop the R3 flag.
+            # Stable assignment preserves continuation/session affinity.
+            urls = sorted({
+                worker["url"].rstrip("/")
+                for worker in workers
+                if worker.get("worker_type", "regular") == "regular"
+            })
+            if len(urls) != len(workers) or not urls:
+                raise RuntimeError("R3 direct dispatch requires regular, unique workers")
+            index = (
+                uuid.uuid5(uuid.NAMESPACE_URL, sample.session_id).int
+                if sample.session_id else sample.index
+            )
+            url = f"{urls[index % len(urls)]}/generate"
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -174,6 +199,13 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     assert (
         sampling_params["max_new_tokens"] >= 0
     ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
+    # Respect the configured total context budget without truncating input tokens.
+    if args.rollout_max_context_len is not None:
+        context_remaining = args.rollout_max_context_len - len(prompt_ids)
+        if context_remaining < 0 or (context_remaining == 0 and sample.response_length == 0):
+            raise ValueError("Prompt leaves no response budget within rollout_max_context_len")
+        sampling_params["max_new_tokens"] = min(sampling_params["max_new_tokens"], context_remaining)
+
     if sampling_params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
@@ -238,10 +270,30 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             raise ValueError(f"SGLang routed_experts_start_len differs from request: {returned_start} != {start}")
 
     if "output_token_logprobs" in output["meta_info"]:
-        new_response_tokens = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-        new_response_log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+        entries = output["meta_info"]["output_token_logprobs"]
+        invalid = [
+            (index, item[1], item[0])
+            for index, item in enumerate(entries)
+            if item[0] is None or not math.isfinite(float(item[0]))
+        ]
+        if invalid:
+            logger.error(
+                "Invalid generation log-probs: sample=%s endpoint=%s "
+                "finish_reason=%r completion_tokens=%s invalid=%r response_prefix=%r",
+                sample.index, url, output["meta_info"].get("finish_reason"),
+                output["meta_info"].get("completion_tokens"), invalid[:16],
+                output.get("text", "")[:512],
+            )
+            raise ValueError("SGLang returned missing or non-finite sampled-token log-probs")
+        new_response_tokens = [item[1] for item in entries]
+        new_response_log_probs = [item[0] for item in entries]
     else:
         new_response_tokens, new_response_log_probs = [], []
+
+    if args.use_rollout_routing_replay and output["meta_info"].get("routed_experts") is None:
+        raise RuntimeError(f"R3 response from {url} is missing routed_experts for sample {sample.index}")
+    if args.use_rollout_routing_replay:
+        logger.info("ROUTING_REPLAY_RECEIVED sample=%s endpoint=%s", sample.index, url)
 
     sample.append_response_tokens(
         args,

@@ -1,6 +1,7 @@
 """GLM-5.3 Flash spec for upstream Megatron, following the GLM5 plugin API."""
 
 import copy
+import os
 
 import torch
 from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
@@ -23,6 +24,14 @@ class Glm5NextLayer(TransformerLayer):
     def __init__(self, *args, hf_config, **kwargs):
         super().__init__(*args, **kwargs)
         self.hf_config = hf_config
+        if hasattr(self.mlp, "experts"):
+            from .moe_chunking import install_moe_chunking
+
+            install_moe_chunking(
+                self.mlp,
+                dispatch_chunk=int(os.environ.get("GLM53_MOE_DISPATCH_CHUNK_SIZE", "0")),
+                expert_chunk=int(os.environ.get("GLM53_EXPERT_TOKEN_CHUNK_SIZE", "0")),
+            )
         n = hf_config.hc_mult
         for kind in ("attn", "ffn"):
             self.register_parameter(

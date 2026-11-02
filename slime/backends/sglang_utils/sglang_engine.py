@@ -70,6 +70,7 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
         base_url=server_args.url(),
         api_key=server_args.api_key,
         is_process_alive=lambda: p.is_alive(),
+        wait_for_metadata=(server_args.device == "npu" and server_args.dp_size > 1),
     )
 
     return p
@@ -89,7 +90,7 @@ def _launch_server(server_args, parent_pid):
         launch_server(server_args)
 
 
-def _wait_server_healthy(base_url, api_key, is_process_alive):
+def _wait_server_healthy(base_url, api_key, is_process_alive, wait_for_metadata=False):
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Authorization": f"Bearer {api_key}",
@@ -108,6 +109,20 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
                 raise Exception("Server process terminated unexpectedly.")
 
             time.sleep(2)
+
+        if wait_for_metadata:
+            # A health generation can finish on one DP rank while peers are
+            # still compiling. The router needs metadata from every rank.
+            while True:
+                try:
+                    response = session.get(f"{base_url}/server_info", headers=headers, timeout=5)
+                    if response.status_code == 200:
+                        break
+                except requests.RequestException:
+                    pass
+                if not is_process_alive():
+                    raise Exception("Server process terminated before metadata became ready.")
+                time.sleep(2)
 
 
 class SGLangEngine(RayActor):
@@ -226,6 +241,21 @@ class SGLangEngine(RayActor):
                 json=payload,
             )
             response.raise_for_status()
+            if server_args_dict.get("device") == "npu" and server_args_dict.get("dp_size", 1) > 1:
+                # POST may only enqueue registration. Finish before later model
+                # operations can block the router's metadata request again.
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    registered = requests.get(
+                        f"http://{self.router_ip}:{self.router_port}/workers", timeout=5
+                    )
+                    registered.raise_for_status()
+                    workers = registered.json().get("workers", [])
+                    if any(w.get("url") == worker_url and w.get("is_healthy") for w in workers):
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError(f"Router did not finish registering {worker_url} within 60 seconds.")
 
     def _make_request(self, endpoint: str, payload: dict | None = None, *, timeout=None):
         """Make a POST request to the specified endpoint with the given payload.

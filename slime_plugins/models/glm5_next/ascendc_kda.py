@@ -7,7 +7,7 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 """AscendC KDA: AscendC forward plus the fused AscendC backward.
 
-Supported: chunk_size=64, K=128, V in {128, 256}, H == HV, dense inputs,
+Supported: chunk_size=64, K=128, V in {128, 256}, H == HV, dense or packed inputs,
 post-sigmoid beta, no initial/final state.
 """
 
@@ -53,6 +53,7 @@ def _chunk_kda_fwd_op(
     use_gate_in_kernel: bool,
     A_log: torch.Tensor | None,
     dt_bias: torch.Tensor | None,
+    cu_seqlens: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     (o, _final_state, g_cumsum, Aqk, Akk, w, _u, qg, kg, v_new, h, _) = ascendc_chunk_kda_fwd(
         q,
@@ -65,7 +66,7 @@ def _chunk_kda_fwd_op(
         layout="BSND",
         initial_state=None,
         output_final_state=False,
-        cu_seqlens=None,
+        cu_seqlens=cu_seqlens,
         chunk_indices=None,
         safe_gate=bool(safe_gate),
         lower_bound=lower_bound,
@@ -111,10 +112,12 @@ def _bhs_to_bsh(tensor):
     return tensor.permute(0, 2, 1).contiguous()
 
 
-def _check_intermediates(q, v, gk, Aqk, Akk, w, qg, kg, v_new, h):
+def _check_intermediates(q, v, gk, Aqk, Akk, w, qg, kg, v_new, h, cu_seqlens=None):
     batch, tokens, heads, key_dim = q.shape
     value_dim = v.shape[3]
     chunks = (tokens + CHUNK_SIZE - 1) // CHUNK_SIZE
+    if cu_seqlens is not None:
+        chunks = sum((b - a + CHUNK_SIZE - 1) // CHUNK_SIZE for a, b in zip(cu_seqlens, cu_seqlens[1:]))
     expected = (
         ("g_cumsum", gk, (batch, heads, tokens, key_dim), torch.float32),
         ("Aqk", Aqk, (batch, heads, tokens, CHUNK_SIZE), q.dtype),
@@ -154,6 +157,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
         use_gate_in_kernel: bool = False,
         safe_gate: bool = False,
         lower_bound: float | None = None,
+        cu_seqlens=None,
     ):
         q_rstd = k_rstd = None
         if use_qk_l2norm_in_kernel:
@@ -178,7 +182,8 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
             def head_slice(tensor, dim):
                 if tensor is None:
                     return None
-                return tensor.narrow(dim, start, end - start).contiguous()
+                with torch.profiler.record_function("glm53::kda_head_slice"):
+                    return tensor.narrow(dim, start, end - start).contiguous()
 
             chunk_outputs = _chunk_kda_fwd_op(
                 head_slice(q, 2),
@@ -192,6 +197,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
                 bool(use_gate_in_kernel),
                 head_slice(A_log, 0) if use_gate_in_kernel else None,
                 dt_bias.reshape(heads, -1)[start:end].flatten().contiguous() if use_gate_in_kernel and dt_bias is not None else None,
+                cu_seqlens,
             )
             if outputs is None:
                 outputs = []
@@ -206,7 +212,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
         (o, g_cumsum, Aqk, Akk, w, qg, kg, v_new, h) = outputs
         final_state = None
 
-        _check_intermediates(q, v, g_cumsum, Aqk, Akk, w, qg, kg, v_new, h)
+        _check_intermediates(q, v, g_cumsum, Aqk, Akk, w, qg, kg, v_new, h, cu_seqlens)
 
         ctx.save_for_backward(
             q,
@@ -227,6 +233,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
             v_new,
             h,
         )
+        ctx.cu_seqlens = cu_seqlens
         ctx.scale = scale
         ctx.safe_gate = safe_gate
         ctx.lower_bound = lower_bound
@@ -269,27 +276,31 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
                     return None
                 return tensor.narrow(dim, start, end - start).contiguous()
 
+            def packed_slice(tensor, dim=1):
+                part = head_slice(tensor, dim)
+                return part.squeeze(0) if part is not None and ctx.cu_seqlens is not None else part
+
             chunk_result = ascendc_chunk_kda_bwd(
-                head_slice(q_h),
-                head_slice(k_h),
-                head_slice(v_h),
-                head_slice(beta_h),
-                head_slice(g_cumsum),
-                head_slice(Aqk),
-                head_slice(Akk),
-                head_slice(w),
-                head_slice(qg),
-                head_slice(kg),
-                head_slice(v_new),
-                head_slice(h, dim=2),
-                head_slice(do_h),
+                packed_slice(q_h),
+                packed_slice(k_h),
+                packed_slice(v_h),
+                packed_slice(beta_h),
+                packed_slice(g_cumsum),
+                packed_slice(Aqk),
+                packed_slice(Akk),
+                packed_slice(w),
+                packed_slice(qg),
+                packed_slice(kg),
+                packed_slice(v_new),
+                packed_slice(h, dim=2),
+                packed_slice(do_h),
                 float(ctx.scale),
-                raw_g=head_slice(raw_g_h),
+                raw_g=packed_slice(raw_g_h),
                 A_log=head_slice(A_log, dim=0) if ctx.use_gate_in_kernel else None,
                 dt_bias=head_slice(gate_dt_bias, dim=0),
                 initial_state=None,
                 dht=None,
-                cu_seqlens=None,
+                cu_seqlens=ctx.cu_seqlens,
                 chunk_indices=None,
                 chunk_size=CHUNK_SIZE,
                 safe_gate=ctx.safe_gate,
@@ -299,6 +310,8 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
                 use_exp2=True,
                 state_v_first=False,
             )
+            if ctx.cu_seqlens is not None:
+                chunk_result = tuple(t.unsqueeze(0) for t in chunk_result[:5]) + tuple(chunk_result[5:])
             if gradients is None:
                 gradients = []
                 for tensor in chunk_result[:5]:
@@ -330,7 +343,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
             dk = l2norm_bwd(k, k_rstd, dk)
 
         # One gradient per positional argument of apply().
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta), dA, dbias, None, None, None, None, None)
+        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta), dA, dbias, None, None, None, None, None, None)
 
 
 @torch.compiler.disable
@@ -351,7 +364,11 @@ def chunk_kda_ascendc(
     **kwargs,
 ):
     if cu_seqlens is not None:
-        raise NotImplementedError("chunk_kda_ascendc supports dense inputs only.")
+        cu_seqlens = cu_seqlens.tolist() if isinstance(cu_seqlens, torch.Tensor) else list(cu_seqlens)
+        if q.shape[0] != 1 or len(cu_seqlens) < 2 or cu_seqlens[0] != 0 or cu_seqlens[-1] != q.shape[1]:
+            raise ValueError("Packed KDA requires batch=1 and boundaries covering all tokens.")
+        if any(b <= a for a, b in zip(cu_seqlens, cu_seqlens[1:])):
+            raise ValueError("Packed KDA requires strictly increasing boundaries.")
     if initial_state is not None:
         raise NotImplementedError("chunk_kda_ascendc does not support initial_state.")
     if output_final_state:
@@ -394,7 +411,7 @@ def chunk_kda_ascendc(
     if scale is None:
         scale = K**-0.5
 
-    pad_len = (-T) % CHUNK_SIZE
+    pad_len = (-T) % CHUNK_SIZE if cu_seqlens is None else 0
     if pad_len:
         q = F.pad(q, (0, 0, 0, 0, 0, pad_len), value=1.0)
         k = F.pad(k, (0, 0, 0, 0, 0, pad_len), value=1.0)
@@ -415,6 +432,7 @@ def chunk_kda_ascendc(
         use_gate_in_kernel,
         safe_gate,
         lower_bound,
+        cu_seqlens,
     )
     if pad_len:
         o = o[:, :T]

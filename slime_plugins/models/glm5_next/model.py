@@ -87,6 +87,15 @@ class Glm5NextModel(MegatronModule):
                 if grids is None:
                     raise ValueError("GLM5-next pixel values require grid_thw")
                 features = self.model.visual(values.to(decoder_input.dtype), grid_thw=grids).pooler_output
+                if not getattr(self, "_visual_input_verified", False):
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "VISUAL_INPUT_VERIFIED pixel_values=%s grid=%s image_tokens=%d features=%d",
+                        tuple(values.shape), grids.tolist(),
+                        int((full_input_ids == token).sum().item()), features.shape[0],
+                    )
+                    self._visual_input_verified = True
+
                 mask = input_ids.transpose(0, 1) == token
                 full_mask = full_input_ids[0] == token
                 if full_mask.sum().item() != features.shape[0]:

@@ -154,3 +154,75 @@ and image/video feature selection and gradients. In the strong-decay test,
 FLA's BF16 backward has cancellation error even at CP=1; the FP32 gate
 parameters are therefore also checked against an independent FP64 recurrence
 to ensure context partitioning does not degrade accuracy.
+
+## Ascend causal convolution
+
+The native NPU backend already uses AscendC KDA forward/backward. Conv1d now has an AscendC forward/backward adapter in ascendc_conv1d.py, based on MindSpeed-Bridge's GLM-5.3-Flash kda_conv1d_fused.py. SiLU remains a separate autograd operation. Packed boundaries reset convolution history per sample. The existing CP gather/scatter path is unchanged; this is not KCP halo exchange.
+
+The native launcher registers cann-custom-ops/glm53-conv/vendors/glm53_conv_transformer under the dependency root before torch_npu initializes, and passes ASCEND_CUSTOM_OPP_PATH to Ray. This package supplies causal_conv1d and causal_conv1d_bwd for Ascend950/CANN 9.2. Older FLA wheels can expose Python wrappers but omit these binary symbols; the adapter supplies only missing convolution symbols from the independent library, retaining the installed KDA implementation.
+
+New native jobs with this vendor registered use fused convolution for BF16/FP16 NPU inputs. Jobs without it retain the PyTorch path. To compare backends, set GLM53_CONV_BACKEND to torch or ascendc in the training worker environment (--train-env-vars). Missing dependencies fail explicitly when ascendc is selected. CPU/FP32 inputs use the reference path.
+
+Run python -m pytest -q -s tests/test_glm5_next_ascendc_conv1d.py after initializing CANN, FLA and the independent vendor. The regression covers forward/input/weight gradients for BF16/FP16, dense and packed inputs, short/empty segments, and 8192 channels.
+
+## Ascend mHC fusion
+
+Native single-node jobs enable GLM53_MHC_BACKEND=ascendc. Set it to torch before launching for an A/B comparison. ops.py dispatches supported BF16 NPU inputs (four streams, 20 Sinkhorn iterations for pre) to ascendc_mhc.py; CPU/CUDA, other dtypes and unsupported pre configurations retain the reference implementation. An unavailable kernel raises an error rather than silently claiming fusion.
+
+The adapter follows MindSpeed-Bridge's GLM-5.3-Flash mHC contract and uses the installed CANN mhc_pre_sinkhorn/mhc_post APIs with their official autograd backward operators. No additional native mHC library is installed. Projection/scale/bias and mixing matrices remain FP32 inside the operations; checkpoint parameter storage/layout is unchanged. Inputs are flattened over token/batch dimensions without mixing tokens. The selected CANN modules are loaded lazily using the shared loader, avoiding eager graph backend imports.
+
+Numerical regression: python -m pytest -q -s tests/test_glm5_next_ascendc_mhc.py. It checks collapsed/post/residual/merged outputs and input, projection, scale, bias, sublayer-output gradients against the original FP32 reference, using hidden size 4096, nontrivial stream mixing, multiple batch sizes and up to 1024 tokens.
+
+
+## Ascend KeyPool and PoolKeyIndexer
+
+Set `GLM53_KPOOL_BACKEND=ascendc` to opt into the CANN forward-only KeyPool
+and PoolKeyIndexer path. The default `torch` preserves the reference indexer.
+The indexer is frozen; this integration does not support an indexer auxiliary
+training loss. It uses the existing CANN installation and requires head
+dimension 128, a supported compression ratio, and topk divisible by that ratio.
+
+Reference: official MindSpeed-Bridge master commit
+`f74d52a8a318c4594202ccdcf96a615b1f2d32da`, downloaded directly from
+https://gitcode.com/Ascend/MindSpeed-Bridge .
+The adapter preserves this model's pre-pooling LayerNorm and FP32 weight
+projection/scaling, then casts score weights to the query dtype as required by
+CANN. Pooling and index selection need not be bitwise identical to the reference.
+
+Packed documents are handled separately in BSH layout, avoiding dependence on
+the SDK's version-specific TND output capacity layout. Empty documents and
+prefixes shorter than one complete pool are handled explicitly. Contiguous
+allgather-CP gathers hidden states in document order and keeps queries local;
+this communicates more data than the reference projected-key/gate gather.
+Other CP partition layouts are not covered by this adapter.
+
+The current CANN build leaves reserved causal-tail slots empty. The adapter
+explicitly appends the original model's causal incomplete-pool token indices,
+and pads the final index width to a multiple of 64 for SparseMLA.
+
+NPU tests: `tests/test_glm5_next_ascendc_kpool.py`. They compare pooled values,
+selected token sets (order is not significant), completeness, uniqueness,
+document boundaries, and causality for full and CP-sliced queries.
+
+
+## Ascend clipped SwiGLU
+
+On NPU, the text ClampedSwiGLU and the vision MLP/merger use the shared
+`ops.swiglu_with_limit` helper. Following official MindSpeed-Bridge commit
+`f74d52a8a318c4594202ccdcf96a615b1f2d32da` (GLM vision modelling/swiglu.py),
+it clamps gate only above the limit and up on both sides, then calls
+`torch_npu.npu_swiglu`. CANN fuses SiLU and multiplication; clamp remains
+outside the fused operator. No new custom operator library is installed.
+
+The native model previously evaluated this activation in FP32. That arithmetic
+and the final cast to the input dtype are retained, unlike Bridge's direct
+input-dtype path. CANN/PyTorch autograd handles the backward and clamp-boundary
+derivatives. `GLM53_SWIGLU_BACKEND=torch` restores the reference implementation;
+the default remains `torch` pending end-to-end consistency validation.
+Use `GLM53_SWIGLU_BACKEND=ascendc` only for explicit fused validation.
+CPU/GPU keep the reference arithmetic.
+
+NPU regression tests: `tests/test_glm5_next_ascendc_swiglu.py`, covering FP32,
+FP16, BF16, exact clamp boundaries, empty token batches, noncontiguous inputs,
+and both forward outputs and input gradients. These checks establish numerical
+correctness, not a full-model speed or memory improvement.

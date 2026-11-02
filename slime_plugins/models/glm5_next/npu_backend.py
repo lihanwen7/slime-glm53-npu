@@ -1,10 +1,12 @@
 """Functional Ascend backend for the native GLM5-next model.
 
-KDA uses the existing AscendC forward/backward bridge. Convolution, gated
-normalization and sparse attention use differentiable PyTorch NPU operations.
+KDA and causal convolution use AscendC forward/backward bridges. Gated
+normalization uses PyTorch NPU operations; sparse MLA uses CANN AscendC.
 CP gathers complete packed streams before recurrent operations: this validates
 functionality, not FLA's GPU CP performance or fused-kernel performance.
 """
+
+import os
 
 from types import SimpleNamespace
 
@@ -37,13 +39,27 @@ def build_cp_context(cu_seqlens, group, conv1d_kernel_size):
 
 
 def _convolve(x, weight, activation, cu):
+    # FLA 26.10 provides Conv1d directly; do not gate it on the legacy vendor.
+    # Keep an explicit torch override for numerical comparisons.
+    backend = os.environ.get("GLM53_CONV_BACKEND", "ascendc")
+    if backend not in ("ascendc", "torch"):
+        raise ValueError(f"Unsupported GLM53_CONV_BACKEND: {backend}")
+    if backend == "ascendc" and x.device.type == "npu" and x.dtype in (torch.bfloat16, torch.float16):
+        from .ascendc_conv1d import causal_conv1d_ascendc
+
+        return causal_conv1d_ascendc(x, weight, activation, cu)
+    return _convolve_torch(x, weight, activation, cu)
+
+
+def _convolve_torch(x, weight, activation, cu):
     outputs = []
     for start, end in zip((bounds := _boundaries(cu, x.shape[1]))[:-1], bounds[1:], strict=True):
         if start == end:
             continue
         part = x[:, start:end].transpose(1, 2)
-        part = F.pad(part, (weight.shape[-1] - 1, 0))
-        part = F.conv1d(part, weight[:, None], groups=weight.shape[0]).transpose(1, 2)
+        with torch.profiler.record_function("glm53::conv_fallback"):
+            part = F.pad(part, (weight.shape[-1] - 1, 0))
+            part = F.conv1d(part, weight[:, None], groups=weight.shape[0]).transpose(1, 2)
         if activation == "silu":
             part = F.silu(part)
         elif activation is not None:
@@ -90,7 +106,19 @@ def chunk_kda(q, k, v, *, g, beta, cu_seqlens, cp_context=None, **kwargs):
     from .ascendc_kda import chunk_kda_ascendc
 
     q, k, v, g, beta = [_gather(x, cp_context).contiguous() for x in (q, k, v, g, beta)]
-    bounds = _boundaries(cu_seqlens, q.shape[1])
+    cpu_bounds = kwargs.pop("cu_seqlens_cpu", None)
+    bounds = list(cpu_bounds) if cpu_bounds is not None else _boundaries(cu_seqlens, q.shape[1])
+    if not bounds or bounds[0] != 0 or bounds[-1] != q.shape[1] or any(b < a for a, b in zip(bounds, bounds[1:])):
+        raise ValueError("KDA sequence boundaries must be ordered and cover the gathered stream.")
+    mode = os.getenv("GLM53_KDA_SEQUENCE_MODE", "loop")
+    if mode not in ("loop", "packed"):
+        raise ValueError(f"Unsupported GLM53_KDA_SEQUENCE_MODE: {mode}")
+    if mode == "packed":
+        # Remove empty sequences without changing token positions.
+        bounds = list(dict.fromkeys(bounds))
+        with torch.profiler.record_function("glm53::kda_packed"):
+            out, _ = chunk_kda_ascendc(q, k, v, g=g, beta=beta, cu_seqlens=bounds, **kwargs)
+        return _local(out, cp_context), None
     outputs = []
     for start, end in zip(bounds[:-1], bounds[1:], strict=True):
         if start == end:
@@ -106,20 +134,7 @@ def chunk_kda(q, k, v, *, g, beta, cu_seqlens, cp_context=None, **kwargs):
 class SparseMLA:
     @staticmethod
     def apply(q, kv, indices, scaling):
-        if kv.shape[1] != 1:
-            raise ValueError("GLM5-next NPU sparse MLA expects one compressed KV group")
-        q_len, k_len = q.shape[0], kv.shape[0]
-        selected = indices[:, 0].long()
-        valid = (selected >= 0) & (selected < k_len)
-        mask = torch.zeros((q_len, k_len), dtype=torch.bool, device=q.device)
-        rows = torch.arange(q_len, device=q.device)[:, None].expand_as(selected)
-        mask[rows[valid], selected[valid]] = True
-        row_valid = mask.any(-1)
-        # Avoid undefined all-masked softmax; remove dummy results and gradients.
-        mask[:, 0] |= ~row_valid
-        scores = torch.einsum("qhd,kd->hqk", q.float(), kv[:, 0].float()) * scaling
-        scores = scores.masked_fill(~mask[None], -torch.inf)
-        probabilities = scores.softmax(-1)
-        out = torch.einsum("hqk,kd->qhd", probabilities, kv[:, 0, :512].float()).to(q.dtype)
-        out = out * row_valid[:, None, None]
-        return out, torch.logsumexp(scores, dim=-1).transpose(0, 1)
+        # Keep CANN SMLA loading lazy for rollout/driver-only imports.
+        from .ascendc_smla import SparseMLA as AscendCSparseMLA
+
+        return AscendCSparseMLA.apply(q, kv, indices, scaling)

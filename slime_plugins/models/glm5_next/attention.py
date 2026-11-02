@@ -92,10 +92,17 @@ class KimiDeltaAttention(nn.Module):
                 )
             qkv.append(convolved.unflatten(-1, (self.heads, self.head_dim)))
         gate = self.f_b_proj(self.f_a_proj(x)).unflatten(-1, (self.heads, self.head_dim))
+        beta_logits = self.b_proj(x)
+        # Ascend inference computes beta sigmoid in FP32 in prefill and decode.
+        beta = (
+            beta_logits.float().sigmoid()
+            if x.device.type == "npu"
+            else beta_logits.sigmoid()
+        )
         output, _ = chunk_kda(
             *qkv,
             g=gate,
-            beta=self.b_proj(x).sigmoid(),
+            beta=beta,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             safe_gate=self.lower_bound is not None,
@@ -104,6 +111,8 @@ class KimiDeltaAttention(nn.Module):
             dt_bias=self.dt_bias,
             cu_seqlens=cu,
             cp_context=cp_context,
+            **({"cu_seqlens_cpu": getattr(packed_seq_params, "cu_seqlens_q_cpu", None)}
+               if os.environ.get("SLIME_ACCELERATOR", "").lower() == "npu" else {}),
         )
         output_gate = self.g_b_proj(self.g_a_proj(x)).reshape(-1, self.head_dim)
         output = self.o_norm(output.reshape(-1, self.head_dim), output_gate).reshape(
@@ -132,6 +141,23 @@ class PooledIndexer(nn.Module):
         # MLA-noPE also disables indexer RoPE. The checkpoint already uses
         # SGLang/HF's channel order, so no half-channel permutation is needed.
         index_q = self.wq_b(q).view(-1, self.heads, self.dim)
+        backend = os.environ.get("GLM53_KPOOL_BACKEND", "torch")
+        if backend not in ("torch", "ascendc"):
+            raise ValueError(f"Unsupported GLM53_KPOOL_BACKEND: {backend}")
+        if backend == "ascendc" and x.device.type == "npu":
+            from .ascendc_kpool import fused_kpool_indexer
+
+            weights = F.linear(x.float(), self.weights_proj.weight.float()) * (self.heads * self.dim) ** -0.5
+            cp_size = cp_group.size() if cp_group is not None else 1
+            cp_rank = cp_group.rank() if cp_group is not None else 0
+            full_x = gather_from_sequence_parallel_region(x, group=cp_group) if cp_size > 1 else x
+            return fused_kpool_indexer(
+                index_q, full_x.reshape(-1, full_x.shape[-1]), weights.reshape(-1, self.heads),
+                self.wk.weight, self.index_kpool_compress_gate, self.index_kpool_compress_ape,
+                self.k_norm.weight, self.k_norm.bias, self.k_norm.eps,
+                packed_seq_params.cu_seqlens_q, self.topk, self.pool_size,
+                query_start=cp_rank * x.shape[0],
+            )
         index_k = self.k_norm(self.wk(x))
         weights = F.linear(x.float(), self.weights_proj.weight.float()) * (self.heads * self.dim) ** -0.5
         gates = F.linear(x, self.index_kpool_compress_gate)
@@ -185,8 +211,11 @@ class NopeDSAttention(nn.Module):
             # The gather's backward reduce-scatters contributions to each KV owner.
             kv = gather_from_sequence_parallel_region(kv, group=self.cp_group)
         indices = self.indexer(x, q_latent, packed_seq_params, self.cp_group)
-        # The shared GLM5 sparse kernel uses a 512+64 layout. A zero tail is
-        # mathematically exact for no-RoPE MLA and keeps its proven backward.
-        out, _ = SparseMLA.apply(F.pad(q, (0, 64)), F.pad(kv[:, None], (0, 64)), indices, self.qk_dim**-0.5)
+        if q.device.type == "npu":
+            # CANN no-RoPE MLA takes the absorbed 512-channel tensors directly.
+            out, _ = SparseMLA.apply(q, kv[:, None], indices, self.qk_dim**-0.5)
+        else:
+            # Preserve the original GPU SparseMLA 512+64 layout.
+            out, _ = SparseMLA.apply(F.pad(q, (0, 64)), F.pad(kv[:, None], (0, 64)), indices, self.qk_dim**-0.5)
         out = torch.bmm(out.transpose(0, 1), wv.transpose(1, 2)).transpose(0, 1)
         return self.o_proj(out.flatten(1)).unsqueeze(1), None

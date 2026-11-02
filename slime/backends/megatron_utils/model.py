@@ -665,6 +665,11 @@ def train_one_step(
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
 
+        if os.environ.get("GLM53_PROFILE_MICROBATCHES", "0") not in ("", "0"):
+            import glm53_train_profiler
+
+            glm53_train_profiler.on_microbatch()
+
         return output_tensor, partial(loss_function, args, batch, num_microbatches, step_global_batch_size)
 
     # Forward pass.

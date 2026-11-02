@@ -111,11 +111,12 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
                 if len(input_ids) <= max_length:
                     kept.append((position, sample))
         if multimodal:
-            from slime.utils.processing_utils import process_vision_info
+            from slime.utils.processing_utils import build_processor_kwargs
 
             for position, sample in multimodal:
-                multimodal_inputs = process_vision_info(sample.prompt, processor)
-                processor_output = processor(text=sample.prompt, **multimodal_inputs)
+                processor_output = processor(
+                    text=sample.prompt, **build_processor_kwargs(sample.multimodal_inputs)
+                )
                 input_ids = processor_output["input_ids"][0]
                 if len(input_ids) <= max_length:
                     kept.append((position, sample))
@@ -228,6 +229,8 @@ class Dataset:
         apply_chat_template=False,
         apply_chat_template_kwargs=None,
     ):
+        if multimodal_keys and processor is None:
+            raise ValueError("Multimodal dataset requires a valid processor; refusing to drop image inputs.")
         origin_samples = []
         for data in read_file(path):
             # Both chat templates and multimodal inputs require conversation format (list of message dicts)

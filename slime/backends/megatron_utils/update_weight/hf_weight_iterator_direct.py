@@ -82,12 +82,13 @@ def _get_megatron_full_params(
     params = []
     for info in megatron_local_param_infos:
         if dist.get_rank() == info.src_rank:
-            params.append(
-                torch.nn.Parameter(
-                    megatron_local_weights[info.name].to(device=accelerator.current_device(), non_blocking=True),
-                    requires_grad=False,
+            with torch.profiler.record_function("glm53::weight_export"):
+                params.append(
+                    torch.nn.Parameter(
+                        megatron_local_weights[info.name].to(device=accelerator.current_device(), non_blocking=True),
+                        requires_grad=False,
+                    )
                 )
-            )
         else:
             params.append(torch.empty(info.shape, dtype=info.dtype, device=accelerator.current_device()))
     accelerator.synchronize()

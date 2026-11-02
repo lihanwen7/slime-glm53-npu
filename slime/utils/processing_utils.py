@@ -83,6 +83,13 @@ def _try_load_glm4v_processor(name_or_path: str, **kwargs):
 
 
 def load_processor(name_or_path: str, **kwargs):
+    config_path = Path(name_or_path) / "processor_config.json"
+    if config_path.exists():
+        with config_path.open() as f:
+            config = json.load(f)
+        if config.get("processor_class") == "Glm5NextProcessor":
+            from slime_plugins.models.glm5_next.processing import Glm5NextProcessor
+            return Glm5NextProcessor.from_pretrained(name_or_path, **kwargs)
     try:
         proc = AutoProcessor.from_pretrained(name_or_path, **kwargs)
     except (OSError, ValueError) as e:

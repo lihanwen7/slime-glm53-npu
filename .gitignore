@@ -205,3 +205,9 @@ _examples_synced/
 /tensorboard_log/
 /dependencies/
 *.bundle
+
+# GLM5.3 generated diagnostics and local backup artifacts.
+/extra-info/
+*.bak
+*.bak-*
+*.bak.*
