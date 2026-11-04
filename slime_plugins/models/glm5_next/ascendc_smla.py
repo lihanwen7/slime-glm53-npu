@@ -38,6 +38,10 @@ class SparseMLA:
         q = q.contiguous()
         kv = kv.contiguous()
         selected = compact_sparse_indices(indices, kv.shape[0])
+        if torch.npu.get_device_name(q.device.index).startswith("Ascend910_93"):
+            from .a3_sparse_mla import sparse_mla
+
+            return sparse_mla(q, kv, selected, scaling), None
         # Bridge takes SBND, then canonicalizes to the native B=1 BSND layout.
         out = fused_sparse_flash_mla(
             q.unsqueeze(0).transpose(0, 1),
