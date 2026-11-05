@@ -98,6 +98,10 @@ class RayTrainGroup:
             env_vars["LD_PRELOAD"] = dynlib_path
             env_vars["TMS_INIT_ENABLE"] = "1"
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
+            if accelerator.is_npu_environment():
+                # Ray inherits the prepared CANN environment. Re-sourcing it in
+                # its worker shell also preloads TMS into every shell utility.
+                env_vars["BASH_ENV"] = "/dev/null"
 
         # We cannot do routing replay for critic.
         if self.args.use_routing_replay and self.role == "actor":
