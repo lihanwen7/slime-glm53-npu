@@ -6,8 +6,9 @@ import torch.nn.functional as F
 import os
 
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from slime.utils import accelerator
 
-if os.environ.get("SLIME_ACCELERATOR", "").lower() == "npu":
+if accelerator.device_type() == "npu":
     from .npu_backend import (
         FusedRMSNormGated,
         ShortConvolution,
@@ -76,9 +77,7 @@ class KimiDeltaAttention(nn.Module):
         cu = packed_seq_params.cu_seqlens_q
         cp_context = None
         if self.cp_group is not None and self.cp_group.size() > 1:
-            # --allgather-cp partitions the packed stream into contiguous
-            # intervals. FLA exchanges convolution halos and recurrent states;
-            # projections and KDA remain local to each interval.
+            # --allgather-cp partitions the packed stream into contiguous intervals.
             cp_context = build_cp_context(cu, self.cp_group, conv1d_kernel_size=self.q_conv1d.kernel_size[0])
         qkv = []
         for name in ("q", "k", "v"):
@@ -112,7 +111,7 @@ class KimiDeltaAttention(nn.Module):
             cu_seqlens=cu,
             cp_context=cp_context,
             **({"cu_seqlens_cpu": getattr(packed_seq_params, "cu_seqlens_q_cpu", None)}
-               if os.environ.get("SLIME_ACCELERATOR", "").lower() == "npu" else {}),
+               if accelerator.device_type() == "npu" else {}),
         )
         output_gate = self.g_b_proj(self.g_a_proj(x)).reshape(-1, self.head_dim)
         output = self.o_norm(output.reshape(-1, self.head_dim), output_gate).reshape(
@@ -141,7 +140,7 @@ class PooledIndexer(nn.Module):
         # MLA-noPE also disables indexer RoPE. The checkpoint already uses
         # SGLang/HF's channel order, so no half-channel permutation is needed.
         index_q = self.wq_b(q).view(-1, self.heads, self.dim)
-        backend = os.environ.get("GLM53_KPOOL_BACKEND", "torch")
+        backend = os.environ.get("GLM53_KPOOL_BACKEND", "torch") if x.device.type == "npu" else "torch"
         if backend not in ("torch", "ascendc"):
             raise ValueError(f"Unsupported GLM53_KPOOL_BACKEND: {backend}")
         if backend == "ascendc" and x.device.type == "npu":

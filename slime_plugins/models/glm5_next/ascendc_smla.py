@@ -1,4 +1,4 @@
-"""Slime GLM5-next no-RoPE boundary for MindSpeed-Bridge's unchanged SMLA.
+"""Slime GLM5-next no-RoPE boundary for A3 and A5 fused sparse MLA.
 
 The caller supplies absorbed 512-channel queries/KV and global sparse indices.
 The generic GLM5/RoPE SparseMLA interface is deliberately left untouched.
@@ -7,9 +7,8 @@ import torch
 from . import mindspeed_smla
 from .cann_smla_ops import load_sparse_ops
 
-# The SDK's top-level import eagerly builds unrelated operators and imports
-# their graph converters. Keep the upstream math/autograd file byte-for-byte;
-# replace only its lazy package loader with the two original SDK modules.
+# Preserve the A5 Bridge math/autograd implementation and resolve its operators
+# through the official installed package, including custom entry-point updates.
 mindspeed_smla._load_smla_ops = load_sparse_ops
 fused_sparse_flash_mla = mindspeed_smla.fused_sparse_flash_mla
 
@@ -33,8 +32,8 @@ class SparseMLA:
     def apply(q, kv, indices, scaling):
         if kv.size(1) != 1 or indices.size(1) != 1:
             raise ValueError("GLM5-next SparseMLA requires one shared KV/index head")
-        # The NPU call site passes its unpadded no-RoPE tensors. The unchanged
-        # Bridge implementation checks the native 512-channel shape itself.
+        # The NPU call site passes unpadded no-RoPE tensors. Each device adapter
+        # validates the native 512-channel shape.
         q = q.contiguous()
         kv = kv.contiguous()
         selected = compact_sparse_indices(indices, kv.shape[0])

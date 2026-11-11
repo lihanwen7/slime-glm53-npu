@@ -3,6 +3,8 @@ import ipaddress
 import logging
 import multiprocessing
 import os
+import re
+import sys
 import time
 
 import requests
@@ -30,20 +32,29 @@ def get_base_gpu_id(args, rank):
     return start_index
 
 
-def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
-    # Expandable segments help the colocated training actor tolerate repeated
-    # cache releases, but SGLang's allocator/sleep path does not support them.
-    # The rollout Ray actor inherits the job environment, so remove the option
-    # before spawning every SGLang server and its children.
-    os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-    os.environ.pop("PYTORCH_ALLOC_CONF", None)
+def prepare_server_environment(environ):
+    """Remove unsupported allocator settings and avoid Mooncake/HTTP port collisions."""
+    for name in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF"):
+        value = environ.get(name)
+        if value is None:
+            continue
+        value = re.sub(r"(^|,)\s*expandable_segments\s*:\s*(?:True|False|true|false|1|0)(?=,|$)", "", value).strip(
+            ", "
+        )
+        if value:
+            environ[name] = value
+        else:
+            environ.pop(name, None)
 
-    # Mooncake's default RPC range (15000-17000) overlaps our HTTP port
-    # allocation. Its workers can bind a port before another server starts.
-    # Preserve explicit ranges, including the legacy PRC spelling.
-    if not any(f"MC_{bound}_{spelling}_PORT" in os.environ for bound in ("MIN", "MAX") for spelling in ("RPC", "PRC")):
-        os.environ["MC_MIN_PRC_PORT"] = "27000"
-        os.environ["MC_MAX_PRC_PORT"] = "28000"
+    # Preserve explicit ranges, including Mooncake's legacy PRC spelling.
+    if not any(f"MC_{bound}_{spelling}_PORT" in environ for bound in ("MIN", "MAX") for spelling in ("RPC", "PRC")):
+        environ["MC_MIN_PRC_PORT"] = "27000"
+        environ["MC_MAX_PRC_PORT"] = "28000"
+
+
+
+def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
+    prepare_server_environment(os.environ)
 
     if getattr(server_args, "encoder_only", False):
         try:
@@ -77,6 +88,7 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
 
 
 def _launch_server(server_args, parent_pid):
+    _prepare_server_stdin()
     if getattr(server_args, "encoder_only", False):
         from sglang.srt.disaggregation.encoder.http_server import launch_server
     else:
@@ -88,6 +100,27 @@ def _launch_server(server_args, parent_pid):
     kill_itself_when_parent_died()
     if os.getppid() == parent_pid:
         launch_server(server_args)
+
+
+def _prepare_server_stdin():
+    # Uvicorn passes stdin's fd to spawn workers. Ray's nested spawn can leave
+    # sys.stdin on a nonstandard fd that is absent in those workers.
+    try:
+        if sys.stdin.fileno() == 0:
+            os.fstat(0)
+            return
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        sys.stdin.close()
+    except (AttributeError, OSError):
+        pass
+    descriptor = os.open(os.devnull, os.O_RDONLY)
+    if descriptor != 0:
+        os.dup2(descriptor, 0)
+        os.close(descriptor)
+    sys.stdin = os.fdopen(0, "r", closefd=False)
+
 
 
 def _wait_server_healthy(base_url, api_key, is_process_alive, wait_for_metadata=False):
@@ -375,8 +408,12 @@ class SGLangEngine(RayActor):
     def get_weight_version(self):
         if self.node_rank != 0:
             return
-        url = f"http://{self.server_host}:{self.server_port}/model_info"
+        url = f"http://{self.server_host}:{self.server_port}/get_weight_version"
         response = requests.get(url, timeout=self.args.rollout_health_check_timeout)
+        if response.status_code in (404, 405):
+            # Use model_info when the weight-version endpoint is unavailable.
+            url = f"http://{self.server_host}:{self.server_port}/model_info"
+            response = requests.get(url, timeout=self.args.rollout_health_check_timeout)
         response.raise_for_status()
         return response.json()["weight_version"]
 

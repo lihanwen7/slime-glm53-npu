@@ -7,10 +7,8 @@ by npu_backend, so packed boundaries here describe complete sequences.
 """
 
 import logging
-import ctypes
 import os
 from functools import lru_cache
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -26,29 +24,28 @@ def _load_ops():
     from fla_npu.ops.ascendc._runtime import runtime
 
     acl = runtime()
-    symbols = ("aclnnCausalConv1d", "aclnnCausalConv1dGetWorkspaceSize",
-               "aclnnCausalConv1dBwd", "aclnnCausalConv1dBwdGetWorkspaceSize")
+    symbols = (
+        "aclnnCausalConv1d",
+        "aclnnCausalConv1dGetWorkspaceSize",
+        "aclnnCausalConv1dBwd",
+        "aclnnCausalConv1dBwdGetWorkspaceSize",
+    )
     try:
         for name in symbols:
             acl.symbol(name)
-    except AttributeError:
-        # Older FLA wheels embed KDA but omit Conv1d. Extend only their missing
-        # convolution symbols; never replace their KDA implementations.
-        root = Path(__file__).resolve().parents[5]
-        vendor = root / "cann-custom-ops/glm53-conv/vendors/glm53_conv_transformer"
-        library = ctypes.CDLL(str(vendor / "op_api/lib/libcust_opapi.so"),
-                              mode=os.RTLD_LOCAL | os.RTLD_NOW | os.RTLD_NODELETE)
-        resolved = {name: getattr(library, name) for name in symbols}
-        acl._symbols.update(resolved)
-        # ctypes function objects retain the library; cache it explicitly too.
-        return npu_causal_conv1d, npu_causal_conv1d_bwd, library
-    return npu_causal_conv1d, npu_causal_conv1d_bwd, None
+    except AttributeError as exc:
+        raise RuntimeError(
+            "FLA-NPU is missing the CANN causal Conv1d forward/backward operators. "
+            "Install the GLM5.3Flash FLA-NPU wheel and source its vendor set_env.bash. "
+            f"ASCEND_CUSTOM_OPP_PATH={os.environ.get('ASCEND_CUSTOM_OPP_PATH', '')}"
+        ) from exc
+    return npu_causal_conv1d, npu_causal_conv1d_bwd
 
 
 class _CausalConv1d(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, boundaries):
-        npu_causal_conv1d, _, _ = _load_ops()
+        npu_causal_conv1d, _ = _load_ops()
 
         global _LOGGED
         if not _LOGGED:
@@ -71,7 +68,7 @@ class _CausalConv1d(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        _, npu_causal_conv1d_bwd, _ = _load_ops()
+        _, npu_causal_conv1d_bwd = _load_ops()
         global _BACKWARD_LOGGED
         if not _BACKWARD_LOGGED:
             logger.info("GLM53_FUSED_CONV_BACKWARD backend=ascendc")

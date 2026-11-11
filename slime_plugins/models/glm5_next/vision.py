@@ -3,6 +3,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from slime.utils import accelerator
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.glm_ocr.modeling_glm_ocr import (
     GlmOcrVisionBlock,
     GlmOcrVisionMlp,
@@ -12,11 +14,10 @@ from transformers.models.glm_ocr.modeling_glm_ocr import (
 )
 
 from .attention import RMSNorm
-from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 
 def vision_swiglu_with_limit(x, limit):
-    # ViT parity must not depend on the language model's fused-op switch.
+    # Vision activations use FP32 independently of the language-model backend.
     gate, up = x.float().chunk(2, dim=-1)
     return (F.silu(gate.clamp(max=limit)) * up.clamp(-limit, limit)).to(x.dtype)
 
@@ -35,9 +36,10 @@ class Glm5NextVisionBlock(GlmOcrVisionBlock):
         super().__init__(config)
         self.norm1 = Glm5NextVisionRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.norm2 = Glm5NextVisionRMSNorm(config.hidden_size, config.rms_norm_eps)
-        # Q/K normalization must use the same configured epsilon as serving.
-        self.attn.q_norm = Glm5NextVisionRMSNorm(config.hidden_size // config.num_heads, config.rms_norm_eps)
-        self.attn.k_norm = Glm5NextVisionRMSNorm(config.hidden_size // config.num_heads, config.rms_norm_eps)
+        # NPU Q/K normalization uses the model epsilon; GPU uses 1e-6.
+        qk_norm_eps = config.rms_norm_eps if accelerator.device_type() == "npu" else 1e-6
+        self.attn.q_norm = Glm5NextVisionRMSNorm(config.hidden_size // config.num_heads, qk_norm_eps)
+        self.attn.k_norm = Glm5NextVisionRMSNorm(config.hidden_size // config.num_heads, qk_norm_eps)
         self.mlp = Glm5NextVisionMLP(config)
 
     def forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):
@@ -84,32 +86,34 @@ class Glm5NextPatchEmbed(GlmOcrVisionPatchEmbed):
         # Every input is exactly one non-overlapping Conv3d patch. GEMM
         # implements the same contraction without cuDNN's BF16 Conv3d fallback.
         patches = hidden_states.reshape(-1, self.proj.weight[0].numel()).to(self.proj.weight.dtype)
-        # SGLang's Conv3dLayer uses this same GEMM and fused bias epilogue.
         return F.linear(patches, self.proj.weight.flatten(1), self.proj.bias)
 
 
 class Glm5NextVisionModel(GlmOcrVisionModel):
     def __init__(self, config):
-        config._attn_implementation = "sdpa"
+        if accelerator.device_type() == "npu":
+            config._attn_implementation = "sdpa"
         super().__init__(config)
         self.patch_embed = Glm5NextPatchEmbed(config)
         self.merger = Glm5NextVisionMerger(config)
         self.blocks = nn.ModuleList([Glm5NextVisionBlock(config) for _ in range(config.depth)])
         self.post_layernorm = Glm5NextVisionRMSNorm(config.hidden_size, config.rms_norm_eps)
-        # Use one FP32 frequency table regardless of the construction device.
-        # CPU/NPU pow differs by an ULP, which can amplify through this ViT.
-        rotary = self.rotary_pos_emb
-        rotary.inv_freq = (
-            1.0 / (rotary.theta ** (torch.arange(0, rotary.dim, 2, dtype=torch.float32, device="cpu") / rotary.dim))
-        ).to(rotary.inv_freq.device)
+        if accelerator.device_type() == "npu":
+            # Use one FP32 frequency table regardless of the construction device.
+            # CPU/NPU pow differs by an ULP, which can amplify through this ViT.
+            rotary = self.rotary_pos_emb
+            rotary.inv_freq = (
+                1.0
+                / (rotary.theta ** (torch.arange(0, rotary.dim, 2, dtype=torch.float32, device="cpu") / rotary.dim))
+            ).to(rotary.inv_freq.device)
 
     def forward(self, hidden_states, grid_thw, **kwargs):
         # Keep GEMM shapes independent of rollout batching and training packing.
-        if len(grid_thw) <= 1:
+        if hidden_states.device.type != "npu" or len(grid_thw) <= 1:
             return super().forward(hidden_states, grid_thw, **kwargs)
         counts = grid_thw.prod(dim=-1).tolist()
         outputs = [
-            super(Glm5NextVisionModel, self).forward(pixels, grid_thw[i:i + 1], **kwargs)
+            super(Glm5NextVisionModel, self).forward(pixels, grid_thw[i : i + 1], **kwargs)
             for i, pixels in enumerate(hidden_states.split(counts))
         ]
         return BaseModelOutputWithPooling(

@@ -108,6 +108,7 @@ class GenerateState(metaclass=SingletonMeta):
             skip_special_tokens=args.rollout_skip_special_tokens,
             no_stop_trim=True,
             spaces_between_special_tokens=False,
+            ignore_eos=getattr(args, "rollout_ignore_eos", False),
         )
         if args.rollout_top_p != 1.0:
             self.sampling_params["custom_params"] = {"return_top_p_token_ids": True}

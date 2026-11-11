@@ -1,82 +1,122 @@
-"""A3 sparse-MLA boundary using CANN SparseFlashAttention forward/backward.
+"""A3 SparseFlashMla autograd boundary for shared absorbed KV.
 
-GLM's absorbed KV is both key and value. Zero RoPE channels preserve its
-no-RoPE scores; trailing -1 index padding preserves the sparse selection.
+Both directions call cann_ops_transformer.ops. Only the A3 forward needs
+paged KV (PA_BBND); backward consumes contiguous BSND and natural-log LSE.
 """
 import torch
 import torch.nn.functional as F
-import torch_npu
+
+from .cann_smla_ops import load_sparse_ops
+
+
+def _lengths(indices):
+    valid = indices.ge(0)
+    first = (~valid).to(torch.int32).argmax(dim=-1).to(torch.int32)
+    return first.masked_fill(valid.all(dim=-1), indices.shape[-1])
+
+
+def _metadata(op, q, kv, selected, lengths):
+    return op(
+        q.shape[-2], 1, 512,
+        cu_seqlens_q=None, cu_seqlens_ori_kv=None,
+        ori_topk_length=lengths, batch_size=1,
+        max_seqlen_q=q.shape[1], max_seqlen_ori_kv=kv.shape[1],
+        max_seqlen_cmp_kv=0, ori_topk=selected.shape[-1], cmp_topk=0,
+        cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=0,
+        ori_win_left=0, ori_win_right=0,
+        layout_q="BSND", layout_kv="BSND", has_ori_kv=True, has_cmp_kv=False,
+    )
+
+
+def _arguments(q, kv, selected, lengths, metadata, scale):
+    return dict(
+        ori_kv=kv, ori_sparse_indices=selected, ori_topk_length=lengths,
+        sinks=torch.full((q.shape[-2],), -float("inf"),
+                         dtype=torch.float32, device=q.device),
+        cu_seqlens_q=None, cu_seqlens_ori_kv=None,
+        metadata=metadata, softmax_scale=scale, cmp_ratio=1,
+        ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=0, ori_win_right=0,
+        layout_q="BSND", layout_kv="BSND",
+    )
 
 
 class _A3SparseMLA(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, kv, indices, scaling):
         if q.ndim != 3 or kv.ndim != 3 or indices.ndim != 3:
-            raise ValueError('A3 sparse MLA expects q/kv [T,N,D], indices [T,1,K]')
+            raise ValueError("A3 MLA expects q/kv [T,N,D], indices [T,1,K]")
         if q.shape[-1] != 512 or kv.shape[-2:] != (1, 512):
-            raise ValueError('A3 sparse MLA requires 512 channels and one shared KV head')
-        if indices.shape[:2] != (q.shape[0], 1):
-            raise ValueError('Sparse indices must provide one shared selection per query')
-        width = ((indices.shape[-1] + 1023) // 1024) * 1024
-        if not 1024 <= width <= 8192:
-            raise ValueError('A3 sparse attention supports padded selection widths 1024..8192')
-        selected = F.pad(indices.to(torch.int32), (0, width - indices.shape[-1]), value=-1)
-        nonempty = selected[..., :1] >= 0
-        # Give empty/padding queries a harmless key, then mask their output and
-        # upstream gradient. This avoids A3's zero-selection scatter path while
-        # preserving exactly zero attention and gradients for empty selections.
-        first = torch.where(nonempty, selected[..., :1], 0)
-        selected = torch.cat((first, selected[..., 1:]), dim=-1)
-        query = q.unsqueeze(0).contiguous()
-        # A3's dense-sequence shortcut assumes selected_count >= KV length
-        # implies a complete, unique selection. KPool may retain duplicates.
-        # Append unselected KV rows so the sparse path is always used; indices
-        # still reference only the original KV, so scores/gradients are unchanged.
-        kv_padding = max(0, width + 1 - kv.shape[0])
-        padded_kv = F.pad(kv, (0, 0, 0, 0, 0, kv_padding)) if kv_padding else kv
-        shared = padded_kv.unsqueeze(0).contiguous()
-        selected = selected.unsqueeze(0).contiguous()
-        query_rope = query.new_zeros((*query.shape[:-1], 64))
-        key_rope = shared.new_zeros((*shared.shape[:-1], 64))
-        output, softmax_max, softmax_sum = torch_npu.npu_sparse_flash_attention(
-            query, shared, shared, selected, scaling,
-            query_rope=query_rope, key_rope=key_rope,
-            sparse_block_size=1, layout_query='BSND', layout_kv='BSND',
-            sparse_mode=0, attention_mode=2, return_softmax_lse=True)
-        ctx.save_for_backward(query, shared, selected, query_rope, key_rope,
-                              output, softmax_max, softmax_sum, nonempty.unsqueeze(0))
-        ctx.scaling = scaling
-        ctx.kv_tokens = kv.shape[0]
-        return torch.where(nonempty, output.squeeze(0), 0)
+            raise ValueError("A3 MLA requires 512 channels and one shared KV head")
+        if indices.shape[:2] != (q.shape[0], 1) or indices.shape[-1] == 0:
+            raise ValueError("A3 MLA requires a nonzero selection width per query")
+        if not q.shape[0] or not kv.shape[0]:
+            raise ValueError("A3 MLA requires nonempty Q and KV")
+        ops = load_sparse_ops()
+        with torch.npu.device(q.device):
+            selected = indices.to(torch.int32).contiguous()
+            nonempty = selected[..., :1].ge(0)
+            # Empty selections have zero output and gradients. Use a safe native
+            # selection, mask the returned output and its upstream gradient.
+            selected = torch.cat((torch.where(nonempty, selected[..., :1], 0),
+                                  selected[..., 1:]), dim=-1).unsqueeze(0)
+            lengths = _lengths(selected)
+            query = q.reshape(1, *q.shape).contiguous()
+            # PA_BBND requires blocks of 16. Keeping S2 >= selection width also
+            # avoids the backward length cap truncating repeated selected slots.
+            # S2 >= S1 also bypasses A3 dense-prefix pruning for unequal Q/KV.
+            padded_tokens = ((max(q.shape[0], kv.shape[0], selected.shape[-1]) + 15) // 16) * 16
+            shared = F.pad(kv, (0, 0, 0, 0, 0, padded_tokens-kv.shape[0]))
+            shared = shared.reshape(1, padded_tokens, 1, 512).contiguous()
+            args = _arguments(query, shared, selected, lengths, None, scaling)
+            args.update(
+                ori_kv=shared.reshape(-1, 16, 1, 512),
+                ori_sparse_indices=selected.reshape(q.shape[0], 1, -1),
+                ori_topk_length=lengths.reshape(q.shape[0], 1),
+                ori_block_table=torch.arange(padded_tokens//16, dtype=torch.int32,
+                                             device=q.device).reshape(1, -1),
+                cmp_block_table=None,
+                cu_seqlens_q=torch.tensor([0, q.shape[0]], dtype=torch.int32,
+                                         device=q.device),
+                seqused_ori_kv=torch.tensor([padded_tokens], dtype=torch.int32,
+                                           device=q.device),
+                layout_q="TND", layout_kv="PA_BBND",
+                topk_value_mode=1, return_softmax_lse=True,
+            )
+            args["metadata"] = ops.sparse_flash_mla_metadata(
+                q.shape[-2], 1, 512,
+                cu_seqlens_q=args["cu_seqlens_q"],
+                seqused_ori_kv=args["seqused_ori_kv"],
+                # The installed A3 TND kernel cannot merge S2 shards. Schedule
+                # whole queries by estimating one KV slot per query; the actual
+                # MLA call below still receives every real selected slot.
+                ori_topk_length=torch.ones_like(args["ori_topk_length"]),
+                batch_size=1, max_seqlen_q=q.shape[0],
+                max_seqlen_ori_kv=padded_tokens, max_seqlen_cmp_kv=0,
+                ori_topk=selected.shape[-1], cmp_topk=0, cmp_ratio=1,
+                ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=0, ori_win_right=0,
+                layout_q="TND", layout_kv="PA_BBND",
+                has_ori_kv=True, has_cmp_kv=False,
+            )
+            output, lse = ops.sparse_flash_mla(query[0], **args)
+            output = output.reshape_as(query)
+            lse = lse.reshape(1, 1, q.shape[0], q.shape[1])
+            ctx.save_for_backward(query, shared, selected, lengths, output, lse,
+                                  nonempty)
+            ctx.scaling = scaling
+            ctx.kv_tokens = kv.shape[0]
+            return torch.where(nonempty, output[0], 0)
 
     @staticmethod
     def backward(ctx, dout):
-        query, shared, selected, _, _, _, _, _, nonempty = ctx.saved_tensors
-        # The shared A3 implementation uses this analytical FP32 derivative
-        # for long/unequal Q/KV selections: native SFAG did not pass its
-        # sparse-index gradient reference. Keep each original selected slot,
-        # including multiplicity, and bound live score memory to 32 queries.
-        # Only this A3 boundary changes; private training code stays pinned.
-        key = shared[0, :, 0].float()
-        dq = torch.empty_like(query)
-        dkv = torch.zeros_like(key)
-        for first in range(0, query.shape[1], 32):
-            last = min(first + 32, query.shape[1])
-            q = query[0, first:last].float().transpose(0, 1)
-            dy = torch.where(nonempty[0, first:last], dout[first:last], 0).float().transpose(0, 1)
-            indices = selected[0, first:last, 0]
-            valid = indices >= 0
-            counts = torch.zeros((last-first, key.shape[0]), device=query.device, dtype=torch.float32)
-            counts.scatter_add_(1, indices.clamp_min(0).long(), valid.float())
-            keep = counts > 0
-            scores = (q @ key.T) * ctx.scaling + counts.clamp_min(1).log()
-            scores.masked_fill_(~keep, -float('inf'))
-            probability = scores.softmax(-1)
-            dp = dy @ key.T
-            ds = probability * (dp - (probability * dp).sum(-1, keepdim=True)) * ctx.scaling
-            dq[0, first:last] = (ds @ key).transpose(0, 1).to(query.dtype)
-            dkv.add_((ds.transpose(-1, -2) @ q + probability.transpose(-1, -2) @ dy).sum(0))
-        return dq.squeeze(0), dkv[:ctx.kv_tokens].unsqueeze(1).to(shared.dtype), None, None
+        q, kv, selected, lengths, output, lse, nonempty = ctx.saved_tensors
+        ops = load_sparse_ops()
+        with torch.npu.device(q.device):
+            metadata = _metadata(ops.sparse_flash_mla_grad_metadata, q, kv,
+                                 selected, lengths)
+            args = _arguments(q, kv, selected, lengths, metadata, ctx.scaling)
+            upstream = torch.where(nonempty, dout, 0).unsqueeze(0).contiguous()
+            dq, dkv, *_ = ops.sparse_flash_mla_grad(q, upstream, output, lse, **args)
+            return dq[0], dkv[0, :ctx.kv_tokens], None, None
 
 
 def sparse_mla(q, kv, indices, scaling):

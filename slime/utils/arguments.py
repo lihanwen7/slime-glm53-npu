@@ -396,6 +396,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="the temperature for the inference engine during rollout. Must be > 0.",
             )
             parser.add_argument(
+                "--rollout-ignore-eos",
+                action="store_true",
+                help="SGLang ignore_eos: keep generating until max_new_tokens even after the "
+                "model emits EOS. Pair with --rollout-max-response-len for fixed-length rollouts.",
+            )
+            parser.add_argument(
                 "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
             )
             parser.add_argument(

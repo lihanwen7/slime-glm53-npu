@@ -54,6 +54,8 @@ class ClampedSwiGLU(torch.nn.Module):
 
 
 def _use_fused_mhc(x):
+    if x.device.type != "npu":
+        return False
     backend = os.environ.get("GLM53_MHC_BACKEND", "torch")
     if backend not in ("torch", "ascendc"):
         raise ValueError(f"Unsupported GLM53_MHC_BACKEND: {backend}")

@@ -179,7 +179,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
         for start in range(0, heads, head_chunk_size):
             end = min(start + head_chunk_size, heads)
 
-            def head_slice(tensor, dim):
+            def head_slice(tensor, dim, start=start, end=end):
                 if tensor is None:
                     return None
                 with torch.profiler.record_function("glm53::kda_head_slice"):
@@ -271,7 +271,7 @@ class ChunkKDAAscendCFunction(torch.autograd.Function):
         for start in range(0, heads, head_chunk_size):
             end = min(start + head_chunk_size, heads)
 
-            def head_slice(tensor, dim=1):
+            def head_slice(tensor, dim=1, start=start, end=end):
                 if tensor is None:
                     return None
                 return tensor.narrow(dim, start, end - start).contiguous()
