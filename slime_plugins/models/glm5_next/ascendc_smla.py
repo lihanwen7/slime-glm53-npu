@@ -1,8 +1,9 @@
-"""Slime GLM5-next no-RoPE boundary for A3 and A5 fused sparse MLA.
+"""Slime GLM5-next no-RoPE boundary for fused sparse attention.
 
 The caller supplies absorbed 512-channel queries/KV and global sparse indices.
 The generic GLM5/RoPE SparseMLA interface is deliberately left untouched.
 """
+import os
 import torch
 from . import mindspeed_smla
 from .cann_smla_ops import load_sparse_ops
@@ -37,6 +38,13 @@ class SparseMLA:
         q = q.contiguous()
         kv = kv.contiguous()
         selected = compact_sparse_indices(indices, kv.shape[0])
+        backend = os.environ.get("GLM53_SPARSE_ATTN_BACKEND", "sfa")
+        if backend == "sfa":
+            from .ascendc_sparse_attention import sparse_attention
+
+            return sparse_attention(q, kv, selected, scaling), None
+        if backend != "smla":
+            raise ValueError(f"Unsupported GLM53_SPARSE_ATTN_BACKEND: {backend}")
         if torch.npu.get_device_name(q.device.index).startswith("Ascend910_93"):
             from .a3_sparse_mla import sparse_mla
 
