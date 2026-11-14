@@ -293,8 +293,7 @@ class MegatronTrainRayActor(TrainRayActor):
     def _switch_model(self, target_tag: str) -> None:
         if target_tag not in self.weights_backuper.backup_tags:
             raise ValueError(f"Cannot switch to unknown model tag: {target_tag}")
-        with torch.profiler.record_function("glm53::switch_model"):
-            self.weights_backuper.restore(target_tag)
+        self.weights_backuper.restore(target_tag)
         self._active_model_tag = target_tag
 
     def fill_routing_replay(self, data_iterator, num_microbatches, rollout_data):
@@ -693,8 +692,7 @@ class MegatronTrainRayActor(TrainRayActor):
         with accelerator.defer_empty_cache() if defer_cache else nullcontext():
             with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
                 print_memory("before update_weights")
-                with torch.profiler.record_function("glm53::update_weights"):
-                    self.weight_updater.update_weights()
+                self.weight_updater.update_weights()
                 print_memory("after update_weights")
 
         if reconnect_rollout_engines:

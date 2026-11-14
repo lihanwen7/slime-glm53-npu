@@ -436,6 +436,61 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-min-new-tokens",
+                type=int,
+                default=None,
+                help="Minimum number of new tokens generated during rollout.",
+            )
+            parser.add_argument(
+                "--rollout-profile-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Opt-in SGLang torch-profiler output directory for rollout generation. "
+                    "When set together with --rollout-profile-rollout-ids, /start_profile is sent "
+                    "to every rollout engine before the selected rollout(s) and /stop_profile after."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-profile-rollout-ids",
+                type=str,
+                default=None,
+                help="Comma-separated rollout ids or ranges to profile, e.g. '2' or '2,5-6'.",
+            )
+            parser.add_argument(
+                "--rollout-profile-num-steps",
+                type=int,
+                default=8,
+                help=(
+                    "Scheduler forward steps to profile per stage; 0 profiles until the rollout ends "
+                    "(large trace). With --rollout-profile-by-stage this applies to prefill and decode separately."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-profile-activities",
+                type=str,
+                default="CPU,GPU",
+                help="Profiler activities; use CPU,GPU on NPU (SGLang maps GPU to the NPU activity).",
+            )
+            parser.add_argument(
+                "--rollout-profile-by-stage",
+                action="store_true",
+                default=False,
+                help="Profile prefill and decode separately (separate trace per stage).",
+            )
+            parser.add_argument(
+                "--rollout-profile-with-stack",
+                action="store_true",
+                default=False,
+                help="Record Python stack traces in the profile (larger trace).",
+            )
+            parser.add_argument(
+                "--rollout-profile-record-shapes",
+                action="store_true",
+                default=False,
+                help="Record operator input shapes in the profile.",
+            )
+            parser.add_argument(
                 "--rollout-skip-special-tokens",
                 action="store_true",
                 default=False,

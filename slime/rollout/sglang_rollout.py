@@ -110,6 +110,8 @@ class GenerateState(metaclass=SingletonMeta):
             spaces_between_special_tokens=False,
             ignore_eos=getattr(args, "rollout_ignore_eos", False),
         )
+        if getattr(args, "rollout_min_new_tokens", None) is not None:
+            self.sampling_params["min_new_tokens"] = args.rollout_min_new_tokens
         if args.rollout_top_p != 1.0:
             self.sampling_params["custom_params"] = {"return_top_p_token_ids": True}
 
@@ -196,6 +198,8 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
 
     sampling_params["max_new_tokens"] -= sample.response_length
+    if "min_new_tokens" in sampling_params:
+        sampling_params["min_new_tokens"] = max(0, sampling_params["min_new_tokens"] - sample.response_length)
 
     assert (
         sampling_params["max_new_tokens"] >= 0
@@ -206,6 +210,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         if context_remaining < 0 or (context_remaining == 0 and sample.response_length == 0):
             raise ValueError("Prompt leaves no response budget within rollout_max_context_len")
         sampling_params["max_new_tokens"] = min(sampling_params["max_new_tokens"], context_remaining)
+
+    if "min_new_tokens" in sampling_params:
+        sampling_params["min_new_tokens"] = min(
+            sampling_params["min_new_tokens"], sampling_params["max_new_tokens"]
+        )
 
     if sampling_params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED

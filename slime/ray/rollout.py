@@ -296,6 +296,68 @@ class RolloutManager:
         """All node-0 engines across all servers / models."""
         return [e for srv in self.servers.values() for e in srv.engines]
 
+    def _rollout_profile_rollout_ids(self) -> set[int]:
+        raw = getattr(self.args, "rollout_profile_rollout_ids", None)
+        if not raw:
+            return set()
+        ids: set[int] = set()
+        for part in str(raw).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                ids.update(range(int(lo), int(hi) + 1))
+            else:
+                ids.add(int(part))
+        return ids
+
+    def _maybe_start_rollout_profile(self, rollout_id):
+        """Start SGLang profiling on every engine for an opted-in rollout."""
+        output_dir = getattr(self.args, "rollout_profile_dir", None)
+        if not output_dir:
+            return []
+        if rollout_id not in self._rollout_profile_rollout_ids():
+            return []
+        engines = [e for e in self.rollout_engines if e is not None]
+        if not engines:
+            logger.warning("Rollout profiling requested for rollout %s but no engines are available", rollout_id)
+            return []
+        activities = [a.strip() for a in str(self.args.rollout_profile_activities).split(",") if a.strip()]
+        num_steps = int(self.args.rollout_profile_num_steps or 0) or None
+        logger.info(
+            "Starting SGLang profile for rollout %s on %s engine(s): dir=%s steps=%s activities=%s by_stage=%s",
+            rollout_id,
+            len(engines),
+            output_dir,
+            num_steps,
+            activities,
+            self.args.rollout_profile_by_stage,
+        )
+        ray.get(
+            [
+                engine.start_profile.remote(
+                    output_dir=output_dir,
+                    num_steps=num_steps,
+                    activities=activities,
+                    profile_by_stage=self.args.rollout_profile_by_stage,
+                    with_stack=bool(self.args.rollout_profile_with_stack),
+                    record_shapes=bool(self.args.rollout_profile_record_shapes),
+                )
+                for engine in engines
+            ]
+        )
+        return engines
+
+    @staticmethod
+    def _stop_rollout_profile(engines):
+        if not engines:
+            return
+        try:
+            ray.get([engine.stop_profile.remote() for engine in engines])
+        except Exception:
+            logger.exception("Failed to stop SGLang rollout profiling")
+
     def get_updatable_engines_and_lock(self):
         """Return engines eligible for weight updates.
 
@@ -544,7 +606,13 @@ class RolloutManager:
                     str(version).isascii() and str(version).isdigit() for version in versions
                 )
                 self.weight_version = max(map(int, versions)) if valid else None
-            data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
+            profile_engines = self._maybe_start_rollout_profile(rollout_id)
+            try:
+                data = call_rollout_fn(
+                    self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False
+                )
+            finally:
+                self._stop_rollout_profile(profile_engines)
             if self.args.rollout_data_transport == "straw":
                 samples = getattr(data, "samples", None)
                 data = accept_raw_rollout(data, self.args, rollout_id, controller=self.controller)
